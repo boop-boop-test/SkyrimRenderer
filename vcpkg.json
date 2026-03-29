@@ -1,0 +1,15 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+    "name": "skyrim-renderer",
+    "version-string": "1.0.0",
+    "description": "Standalone offscreen 3D renderer for Skyrim NIF meshes.",
+    "license": "Apache-2.0",
+    "dependencies": [
+        "directxmath",
+        "directxtk",
+        "fmt",
+        "rapidcsv",
+        "spdlog",
+        "xbyak"
+    ]
+}

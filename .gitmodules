@@ -1,0 +1,7 @@
+[submodule "extern/nifly"]
+	path = extern/nifly
+	url = https://github.com/ousnius/nifly.git
+[submodule "extern/CommonLibVR-ng"]
+	path = extern/CommonLibVR-ng
+	url = https://github.com/alandtse/CommonLibVR.git
+	branch = ng
