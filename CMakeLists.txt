@@ -156,26 +156,34 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES
     ${SKYRIM_RENDERER_HEADERS} ${SKYRIM_RENDERER_SOURCES})
 
 ###############################################################################
-# Distribution — copy DLL to contrib/ for packaging (standalone only)
+# Distribution — populate contrib/ for FOMOD packaging (standalone only)
 ###############################################################################
 if(PROJECT_IS_TOP_LEVEL)
+    set(DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/contrib/Distribution")
+
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(BUILD_NAME "Debug")
     else()
         set(BUILD_NAME "Release")
     endif()
 
+    # DLL
     add_custom_command(TARGET skyrim-renderer-lib POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/contrib/Distribution/Plugin${BUILD_NAME}/")
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${DIST_DIR}/Plugin${BUILD_NAME}/")
     add_custom_command(TARGET skyrim-renderer-lib POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE:skyrim-renderer-lib>
-            "${CMAKE_CURRENT_SOURCE_DIR}/contrib/Distribution/Plugin${BUILD_NAME}/")
+            "${DIST_DIR}/Plugin${BUILD_NAME}/")
     if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
         add_custom_command(TARGET skyrim-renderer-lib POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy
                 $<TARGET_PDB_FILE:skyrim-renderer-lib>
-                "${CMAKE_CURRENT_SOURCE_DIR}/contrib/Distribution/Plugin${BUILD_NAME}/")
+                "${DIST_DIR}/Plugin${BUILD_NAME}/")
     endif()
+
+    # Shaders
+    add_custom_command(TARGET skyrim-renderer-lib POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+            "${DIST_DIR}/Shaders/")
 endif()

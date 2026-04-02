@@ -1,0 +1,7 @@
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+	<moduleName>SkyrimRenderer</moduleName>
+	<requiredInstallFiles>
+		<folder source="Shaders" destination="SKSE/Plugins/SkyrimRenderer/shaders" />
+		<folder source="PluginRelease" destination="SKSE/Plugins" />
+	</requiredInstallFiles>
+</config>

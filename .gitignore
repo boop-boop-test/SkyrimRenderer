@@ -11,3 +11,4 @@ _deps/
 # Distribution build artifacts
 contrib/Distribution/**/*.dll
 contrib/Distribution/**/*.pdb
+contrib/*.zip

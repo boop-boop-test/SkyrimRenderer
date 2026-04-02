@@ -1,11 +1,10 @@
 #pragma once
 
-/// @file SkyrimRendererExport.h
-/// @brief DLL export/import macro for SkyrimRenderer.
-///
-/// SKYRIMRENDERER_STATIC  — defined when consuming as a static library (default)
-/// SKYRIMRENDERER_EXPORTS — defined when building the DLL (set by CMake)
-/// Neither                — defined when consuming the DLL (dllimport)
+// DLL export/import macro.
+//
+// SKYRIMRENDERER_STATIC  - consuming as static lib (no decoration)
+// SKYRIMRENDERER_EXPORTS - building the DLL (dllexport)
+// Neither                - consuming the DLL (dllimport)
 
 #if defined(SKYRIMRENDERER_STATIC)
     #define SKYRIMRENDERER_API

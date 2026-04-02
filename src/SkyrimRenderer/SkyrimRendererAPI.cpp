@@ -17,19 +17,13 @@
 
 using namespace SkyrimRenderer;
 
-// ============================================================================
-// Internal handle maps for opaque builder objects
-// ============================================================================
-
 namespace {
 
-// ── Morph map builder ──────────────────────────────────────────────────────
+// Handle maps for opaque builder objects managed by the API layer.
 
 std::mutex g_morphMapMutex;
 std::unordered_map<uint32_t, ActorMorphMap> g_morphMaps;
 uint32_t g_nextMorphMapId = 1;
-
-// ── String list results ────────────────────────────────────────────────────
 
 struct StringListData {
     std::vector<std::string> strings;
@@ -38,8 +32,6 @@ struct StringListData {
 std::mutex g_stringListMutex;
 std::unordered_map<uint32_t, StringListData> g_stringLists;
 uint32_t g_nextStringListId = 1;
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 inline SceneHandle ToScene(uint32_t h) { return static_cast<SceneHandle>(h); }
 inline ActorHandle ToActor(uint32_t h) { return static_cast<ActorHandle>(h); }
@@ -51,7 +43,6 @@ inline CameraPreset ToCamPreset(uint32_t p) { return static_cast<CameraPreset>(p
 
 inline uint32_t FromResult(Result r) { return static_cast<uint32_t>(r); }
 
-/// Convert C LightConfig → C++ LightConfig.
 inline LightConfig FromCLight(const SkyrimRenderer_LightConfig& c) {
     LightConfig out;
     out.enabled     = c.enabled != 0;
@@ -65,7 +56,6 @@ inline LightConfig FromCLight(const SkyrimRenderer_LightConfig& c) {
     return out;
 }
 
-/// Convert C++ LightConfig → C LightConfig.
 inline SkyrimRenderer_LightConfig ToCLight(const LightConfig& cpp) {
     SkyrimRenderer_LightConfig out{};
     out.enabled     = cpp.enabled ? 1 : 0;
@@ -81,17 +71,10 @@ inline SkyrimRenderer_LightConfig ToCLight(const LightConfig& cpp) {
 
 } // anonymous namespace
 
-// ============================================================================
-// Version
-// ============================================================================
-
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void) {
     return 1;
 }
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
 
 SKYRIMRENDERER_API int32_t SkyrimRenderer_InstallPresentHook(void) {
     return SceneManager::GetInstance().InstallPresentHook() ? 1 : 0;
@@ -129,9 +112,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetPerFrameCallback(SkyrimRenderer_FrameC
     SceneManager::GetInstance().SetPerFrameCallback([callback]() { callback(); });
 }
 
-// ============================================================================
-// Scene
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_CreateScene(uint32_t width, uint32_t height) {
     return static_cast<uint32_t>(SceneManager::GetInstance().CreateScene(width, height));
@@ -174,9 +154,6 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadbackPixels(
     return FromResult(result);
 }
 
-// ============================================================================
-// Camera
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
     uint32_t scene, float yaw, float pitch, float distance, float focalHeight) {
@@ -205,9 +182,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_GetCameraState(
     out->focalHeight = rs->GetCameraFocalHeight();
 }
 
-// ============================================================================
-// Lighting
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetLightingPreset(uint32_t scene, uint32_t preset) {
     SceneManager::GetInstance().SetLightingPreset(ToScene(scene), ToLightPreset(preset));
@@ -230,18 +204,12 @@ SKYRIMRENDERER_API void SkyrimRenderer_GetLight(
     *out = ToCLight(rs->GetLight(index));
 }
 
-// ============================================================================
-// Background
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetBackground(
     uint32_t scene, float r, float g, float b, float a) {
     SceneManager::GetInstance().SetBackground(ToScene(scene), SkyrimRenderer::Color{r, g, b, a});
 }
 
-// ============================================================================
-// Frame Overlay
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetFrameOverlay(
     uint32_t scene, const wchar_t* colorPath, const wchar_t* maskPath, float depthScale) {
@@ -304,9 +272,6 @@ SKYRIMRENDERER_API SkyrimRenderer_StringList SkyrimRenderer_GetPostProcessStack(
     return id;
 }
 
-// ============================================================================
-// String List
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_StringListCount(SkyrimRenderer_StringList list) {
     std::lock_guard lock(g_stringListMutex);
@@ -317,6 +282,8 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_StringListCount(SkyrimRenderer_String
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_StringListGet(
     SkyrimRenderer_StringList list, uint32_t index, char* out_buf, uint32_t bufSize) {
+    if (!out_buf || bufSize == 0) return 0;
+
     std::lock_guard lock(g_stringListMutex);
     auto it = g_stringLists.find(list);
     if (it == g_stringLists.end() || index >= it->second.strings.size()) return 0;
@@ -333,9 +300,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_FreeStringList(SkyrimRenderer_StringList 
     g_stringLists.erase(list);
 }
 
-// ============================================================================
-// Compositing
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetCompositeRect(
     uint32_t scene, float x, float y, float width, float height) {
@@ -346,9 +310,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearCompositeRect(uint32_t scene) {
     SceneManager::GetInstance().ClearCompositeRect(ToScene(scene));
 }
 
-// ============================================================================
-// Mesh
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadMesh(uint32_t scene, const char* meshPath) {
     return SceneManager::GetInstance().LoadMesh(ToScene(scene), meshPath ? meshPath : "");
@@ -358,9 +319,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearMeshes(uint32_t scene) {
     SceneManager::GetInstance().ClearMeshes(ToScene(scene));
 }
 
-// ============================================================================
-// Actor
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorPreview(
     uint32_t scene, uint32_t actorFormID, const char* animationPath) {
@@ -417,9 +375,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_RebuildWithCurrentOutfit(uint32_t actor) 
     if (preview) preview->RebuildWithCurrentOutfit();
 }
 
-// ============================================================================
-// Animation
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadAnimation(uint32_t actor, const char* animationPath) {
     return FromResult(SceneManager::GetInstance().LoadAnimation(
@@ -479,9 +434,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_GetAnimationState(
     out->clipName[copyLen] = '\0';
 }
 
-// ============================================================================
-// Morphs
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_CreateMorphMap(void) {
     std::lock_guard lock(g_morphMapMutex);
@@ -520,9 +472,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearActorMorphs(uint32_t actor) {
     SceneManager::GetInstance().ClearActorMorphs(ToActor(actor));
 }
 
-// ============================================================================
-// Overlay
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_AddOverlay(
     const wchar_t* imagePath, float width, float height) {
@@ -554,9 +503,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_DetachOverlayFromScene(uint32_t overlay) 
     SceneManager::GetInstance().DetachOverlayFromScene(ToOverlay(overlay));
 }
 
-// ============================================================================
-// Export
-// ============================================================================
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportPNG(uint32_t scene, const char* filePath) {
     return FromResult(SceneManager::GetInstance().ExportPNG(ToScene(scene), filePath));
@@ -566,17 +512,11 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportDDS(uint32_t scene, const char*
     return FromResult(SceneManager::GetInstance().ExportDDS(ToScene(scene), filePath));
 }
 
-// ============================================================================
-// Texture Cache
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetTextureMipSkip(uint32_t levels) {
     TextureCache::GetInstance().SetMipSkip(levels);
 }
 
-// ============================================================================
-// Body Mesh Preload
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_PreloadBodyMeshes(void) {
     auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -602,9 +542,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_PreloadBodyMeshes(void) {
     }).detach();
 }
 
-// ============================================================================
-// SkyPatcher
-// ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void) {
     SkyPatcherService::GetInstance().Load();

@@ -1,0 +1,9 @@
+<fomod>
+	<Name>SkyrimRenderer</Name>
+	<Author>Koukibyou</Author>
+	<Version>1.0.0</Version>
+	<Description>Offscreen 3D renderer for Skyrim NIF meshes. Provides actor preview rendering, lighting, post-processing, and animation support via an SKSE plugin DLL. Required by DressCode for character previews.</Description>
+	<Groups>
+		<element>Modders Resources</element>
+	</Groups>
+</fomod>
