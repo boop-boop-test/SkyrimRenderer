@@ -285,7 +285,7 @@ void RenderScene::SetFOV(float fovDegrees) {
 void RenderScene::SetCameraPreset(CameraPreset preset) {
     std::lock_guard lock(mutex_);
     camera_.SetPreset(preset, niflyMeshes_, sceneRoot_.get(),
-                      hasHeadBone_ ? &headBonePos_ : nullptr);
+                      hasHeadBone_ ? &headBonePos_ : nullptr, gpuSkinningPose_);
 }
 
 float RenderScene::GetCameraYaw() const { return camera_.GetYaw(); }

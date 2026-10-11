@@ -115,7 +115,8 @@ extern "C" {
 //   6 - LoadActorHead draws every head but the player's live face on the race
 //       skeleton NIF's bind pose itself (where the camera presets frame it);
 //       before, clients called ApplyNifBindPose. A repeat call is harmless.
-#define SKYRIMRENDERER_API_VERSION 6
+//   7 - camera preset 4 = FaceClose (SetCameraPreset), build 1.5.0
+#define SKYRIMRENDERER_API_VERSION 7
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -175,7 +176,18 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
     uint32_t scene, float yaw, float pitch, float distance, float focalHeight);
 
 // preset: 0=FullBody, 1=UpperBody, 2=Face, 3=HeadShot (API v5: head and neck fill
-// the frame, for portraits; earlier DLLs ignore 3)
+// the frame, for portraits; earlier DLLs ignore 3), 4=FaceClose (API v7).
+//
+// FaceClose: brows to chin fill the frame (1.3x their height, so the top of
+// the head and the ears may be cropped), centred on the eyes, level camera.
+// Brows are the top of the brow head part, or 1.12 eye heights above the top
+// of the eyes when there is none; the chin is the lowest point of the FaceGen
+// face in front of the line midway between the chin's and the neck's front,
+// or 0.84 eye-to-mouth distances below the mouth when the face's drawn
+// vertices are not known. Measured on the head as drawn under the actor's
+// current pose, so call it after SetPose to frame the posed head. Without a
+// FaceGen face, eyes and a mouth (helmets, creatures) it frames as HeadShot.
+// DLLs before API v7 ignore 4.
 SKYRIMRENDERER_API void SkyrimRenderer_SetCameraPreset(uint32_t scene, uint32_t preset);
 
 SKYRIMRENDERER_API void SkyrimRenderer_PanCamera(uint32_t scene, float dx, float dy);

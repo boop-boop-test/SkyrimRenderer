@@ -69,7 +69,8 @@ enum class CameraPreset {
     FullBody,    // Full body view
     UpperBody,   // Waist up
     Face,        // Close-up on face
-    HeadShot     // Portrait: head and neck fill the frame (fits the face mesh)
+    HeadShot,    // Portrait: head and neck fill the frame (fits the face mesh)
+    FaceClose    // Portrait: brows to chin fill the frame; HeadShot without eyes / mouth / face
 };
 
 /// ENB rendering mode
