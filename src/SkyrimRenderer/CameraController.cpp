@@ -109,6 +109,56 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
             }
             break;
         }
+        case CameraPreset::HeadShot: {
+            // Head and neck fill the frame. The FaceGen face shape runs from
+            // the neck seam to the crown; hair / eyes may add a little on top
+            // (capped so long hair does not pull the frame down the back).
+            float fMin[3] = {1e9f, 1e9f, 1e9f}, fMax[3] = {-1e9f, -1e9f, -1e9f};
+            bool foundFace = false;
+            for (const auto& m : meshes) {
+                if (m.shadingModel != ShadingModel::FaceGen) continue;
+                for (int a = 0; a < 3; ++a) {
+                    fMin[a] = std::min(fMin[a], m.boundsMin[a]);
+                    fMax[a] = std::max(fMax[a], m.boundsMax[a]);
+                }
+                foundFace = true;
+            }
+            if (!foundFace) {
+                // No face shape (helmet, creature): a fixed head-sized frame on
+                // the head bone, else the top of the bounds.
+                const float z = headBonePos ? headBonePos->z : center.z + radius * 0.7f;
+                if (headBonePos) {
+                    orbitCenterX_ = headBonePos->x;
+                    orbitCenterY_ = headBonePos->y;
+                }
+                SetOrbit(0.0f, 0.0f, 45.0f, z);
+                break;
+            }
+
+            const float faceHeight = fMax[2] - fMin[2];
+            float top = fMax[2];
+            for (const auto& m : meshes) {
+                if (m.shadingModel != ShadingModel::HairTint && m.shadingModel != ShadingModel::EyeEnvMap) continue;
+                top = std::max(top, std::min(m.boundsMax[2], fMax[2] + faceHeight * 0.15f));
+            }
+            const float bottom = fMin[2];
+            const float height = top - bottom;
+            const float width = fMax[0] - fMin[0];
+            const float depth = fMax[1] - fMin[1];
+
+            // Fit the taller of height / width into the vertical FOV (square
+            // or wider targets get the same or more side room), measured at
+            // the front of the face.
+            // 12% room: the portrait is posed (idle) after framing on the bind pose.
+            constexpr float kMargin = 1.12f;
+            const float tanHalf = std::tan(fov_ * 0.5f * 3.14159265f / 180.0f);
+            const float fit = std::max(height, width) * 0.5f * kMargin / std::max(tanHalf, 0.01f);
+
+            orbitCenterX_ = (fMin[0] + fMax[0]) * 0.5f;
+            orbitCenterY_ = headBonePos ? headBonePos->y : (fMin[1] + fMax[1]) * 0.5f;
+            SetOrbit(0.0f, 0.0f, fit + depth * 0.5f, (bottom + top) * 0.5f);
+            break;
+        }
     }
 }
 

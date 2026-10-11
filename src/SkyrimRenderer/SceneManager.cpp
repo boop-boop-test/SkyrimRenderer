@@ -8,6 +8,7 @@
 #include <SKSE/SKSE.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <future>
 #include <unordered_set>
@@ -33,10 +34,65 @@ void SceneManager::SetPerFrameCallback(PerFrameCallback callback) {
     perFrameCallback_ = std::move(callback);
 }
 
+namespace {
+
+constexpr int kPresentIndex = 8;      // IDXGISwapChain::Present
+constexpr int kSwapChainSlots = 18;   // IUnknown(3) + IDXGIObject(4) + IDXGIDeviceSubObject(1) + IDXGISwapChain(10)
+
+bool IsExecutableAddress(const void* p) {
+    if (!p) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    constexpr DWORD kExec = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    DWORD protect = mbi.Protect & 0xFF;
+    return (protect & kExec) != 0 && (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
+}
+
+std::filesystem::path ModulePathForAddress(const void* p) {
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(p), &mod) || !mod) {
+        return {};
+    }
+    wchar_t buf[MAX_PATH]{};
+    DWORD n = GetModuleFileNameW(mod, buf, MAX_PATH);
+    return n ? std::filesystem::path(buf) : std::filesystem::path{};
+}
+
+std::filesystem::path LoadedModulePath(const wchar_t* baseName) {
+    HMODULE mod = GetModuleHandleW(baseName);
+    if (!mod) return {};
+    wchar_t buf[MAX_PATH]{};
+    DWORD n = GetModuleFileNameW(mod, buf, MAX_PATH);
+    return n ? std::filesystem::path(buf) : std::filesystem::path{};
+}
+
+bool IsUnderSystemDirectory(const std::filesystem::path& p) {
+    wchar_t sys[MAX_PATH]{};
+    if (!GetSystemDirectoryW(sys, MAX_PATH)) return false;
+    std::error_code ec;
+    auto rel = std::filesystem::relative(p, sys, ec);
+    if (ec || rel.empty()) return false;
+    return rel.native().rfind(L"..", 0) != 0;
+}
+
+} // namespace
+
 HRESULT STDMETHODCALLTYPE SceneManager::HookedPresent(
     IDXGISwapChain* swapChain, UINT syncInterval, UINT flags)
 {
     auto& inst = GetInstance();
+
+    // Only the engine's own swapchain gets our work. The identity test is a
+    // pointer compare, never swapChain->GetDevice(): a wrapper that hands its
+    // device out without adding a reference costs the game one reference per
+    // frame until the device is freed (Magelight 0.30.3).
+    if (static_cast<void*>(swapChain) != gameSwapChain_ || inst.IsDeviceLost()) {
+        return originalPresent_(swapChain, syncInterval, flags);
+    }
 
     static uint32_t presentDiagCount = 0;
     if (++presentDiagCount % 300 == 1) {
@@ -49,33 +105,84 @@ HRESULT STDMETHODCALLTYPE SceneManager::HookedPresent(
         inst.perFrameCallback_();
     }
 
-    // 0.5. Tick animations (advances playing animations and re-skins meshes)
-    {
-        auto now = std::chrono::steady_clock::now();
-        float dt = 0.0f;
-        if (inst.lastFrameTime_.time_since_epoch().count() != 0) {
-            dt = std::chrono::duration<float>(now - inst.lastFrameTime_).count();
-            dt = std::min(dt, 0.1f);  // cap at 100ms to avoid huge jumps on hitches
-        }
-        inst.lastFrameTime_ = now;
-        if (dt > 0.0f) {
-            inst.TickAnimations(dt);
+    // 1. Animations + offscreen renders / readbacks
+    inst.Tick();
+
+    // 2. Composite BEFORE Present into the engine's framebuffer. Other hooks
+    //    earlier in the Present chain may have already drawn; our quads draw
+    //    over that output, then Present shows the final frame.
+    inst.CompositeAllScenes();
+
+    // 3. Present
+    return originalPresent_(swapChain, syncInterval, flags);
+}
+
+void SceneManager::Tick() {
+    if (IsDeviceLost()) return;
+
+    // Advance playing animations (re-skins meshes, queues re-renders)
+    auto now = std::chrono::steady_clock::now();
+    float dt = 0.0f;
+    if (lastFrameTime_.time_since_epoch().count() != 0) {
+        dt = std::chrono::duration<float>(now - lastFrameTime_).count();
+        dt = std::min(dt, 0.1f);  // cap at 100ms to avoid huge jumps on hitches
+    }
+    lastFrameTime_ = now;
+    if (dt > 0.0f) {
+        TickAnimations(dt);
+    }
+
+    ProcessPendingRenders();
+}
+
+void SceneManager::LogPresentLayers(const void* presentSlot) {
+    auto owner = ModulePathForAddress(presentSlot);
+    SKSE::log::info("[SkyrimRenderer] Present slot {} is in {}", presentSlot,
+                    owner.empty() ? std::string("<unknown module>") : owner.filename().string());
+
+    struct Layer { const wchar_t* module; const char* what; bool dropsPresent; };
+    static constexpr Layer kLayers[] = {
+        { L"sl.interposer.dll",   "NVIDIA Streamline (Community Shaders / Open Shaders DLSS, frame generation)", true },
+        { L"nvngx_dlssg.dll",     "DLSS frame generation",                                                      true },
+        { L"NvPresent64.dll",     "NVIDIA Smooth Motion (driver frame generation)",                             true },
+        { L"SkyrimUpscaler.dll",  "Skyrim Upscaler (HUD Fix drops draws at Present)",                           true },
+        { L"CommunityShaders.dll","Community Shaders",                                                           false },
+        { L"ReShade64.dll",       "ReShade",                                                                     false },
+    };
+    bool frameGen = false;
+    for (const auto& layer : kLayers) {
+        auto path = LoadedModulePath(layer.module);
+        if (path.empty()) continue;
+        SKSE::log::info("[SkyrimRenderer] Present layer: {} ({})", path.filename().string(), layer.what);
+        frameGen |= layer.dropsPresent;
+    }
+
+    // ENB and ReShade load as a d3d11.dll / dxgi.dll beside the game executable.
+    for (const wchar_t* proxy : { L"d3d11.dll", L"dxgi.dll" }) {
+        auto path = LoadedModulePath(proxy);
+        if (!path.empty() && !IsUnderSystemDirectory(path)) {
+            SKSE::log::info("[SkyrimRenderer] Present layer: proxy {} (ENB / ReShade style) at {}",
+                            path.filename().string(), path.string());
         }
     }
 
-    // 1. Process offscreen renders + readbacks
-    inst.ProcessPendingRenders(swapChain);
+    // Community Shaders' frame-generation swapchain owns the Present slot itself.
+    if (!owner.empty()) {
+        auto name = owner.filename().string();
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "communityshaders.dll") {
+            SKSE::log::info("[SkyrimRenderer] Present layer: Community Shaders frame-generation swapchain proxy");
+            frameGen = true;
+        } else if (name != "dxgi.dll") {
+            SKSE::log::info("[SkyrimRenderer] Present slot already belongs to another layer ({})", name);
+        }
+    }
 
-    // 2. Composite BEFORE Present — the backbuffer is still valid here.
-    //    Other hooks earlier in the Present chain may have already drawn to the
-    //    backbuffer. Our quad draws OVER that output, then Present shows the
-    //    final composited frame.
-    inst.CompositeAllScenes(swapChain);
-
-    // 3. Present the composited backbuffer
-    HRESULT hr = originalPresent_(swapChain, syncInterval, flags);
-
-    return hr;
+    if (frameGen) {
+        SKSE::log::warn("[SkyrimRenderer] A frame-generation / HUD-fix layer is loaded: anything drawn at "
+                        "Present (composite rects, overlays) may be dropped. Texture-mode consumers are unaffected.");
+    }
 }
 
 bool SceneManager::InstallPresentHook() {
@@ -94,18 +201,38 @@ bool SceneManager::InstallPresentHook() {
         return false;
     }
 
-    // Get the vtable from the swap chain COM object
-    swapChainVtable_ = *reinterpret_cast<void***>(swapChain);
+    void** vtable = *reinterpret_cast<void***>(swapChain);
+    if (!vtable) {
+        SKSE::log::error("[SkyrimRenderer] SwapChain has no vtable; Present hook not installed");
+        return false;
+    }
 
-    // IDXGISwapChain::Present is at vtable index 8
-    constexpr int kPresentIndex = 8;
+    // Every IDXGISwapChain slot must point into committed executable memory
+    // before anything is written. A proxy with a short or odd vtable (Community
+    // Shaders' frame-generation swapchain) is left alone: writing into such a
+    // table broke GetDevice and other plugins' interfaces (Magelight 0.30.5).
+    for (int i = 0; i < kSwapChainSlots; ++i) {
+        if (!IsExecutableAddress(vtable[i])) {
+            SKSE::log::error("[SkyrimRenderer] SwapChain vtable slot {} ({}) is not code; swapchain "
+                             "untrusted, Present hook not installed", i, vtable[i]);
+            return false;
+        }
+    }
+
+    LogPresentLayers(vtable[kPresentIndex]);
+
+    swapChainVtable_ = vtable;
     originalPresent_ = reinterpret_cast<PresentFn>(swapChainVtable_[kPresentIndex]);
+    gameSwapChain_ = swapChain;
 
     // Make vtable writable, patch, restore protection
     DWORD oldProtect;
     if (!VirtualProtect(&swapChainVtable_[kPresentIndex], sizeof(void*),
                         PAGE_READWRITE, &oldProtect)) {
         SKSE::log::error("[SkyrimRenderer] VirtualProtect failed for Present hook");
+        swapChainVtable_ = nullptr;
+        originalPresent_ = nullptr;
+        gameSwapChain_ = nullptr;
         return false;
     }
 
@@ -113,15 +240,14 @@ bool SceneManager::InstallPresentHook() {
     VirtualProtect(&swapChainVtable_[kPresentIndex], sizeof(void*), oldProtect, &oldProtect);
 
     hookInstalled_ = true;
-    SKSE::log::info("[SkyrimRenderer] Present hook installed (original={})",
-                    (void*)originalPresent_);
+    SKSE::log::info("[SkyrimRenderer] Present hook installed (swapchain={} original={})",
+                    gameSwapChain_, (void*)originalPresent_);
     return true;
 }
 
 void SceneManager::UninstallPresentHook() {
     if (!hookInstalled_ || !swapChainVtable_ || !originalPresent_) return;
 
-    constexpr int kPresentIndex = 8;
     DWORD oldProtect;
     if (VirtualProtect(&swapChainVtable_[kPresentIndex], sizeof(void*),
                        PAGE_READWRITE, &oldProtect)) {
@@ -131,7 +257,50 @@ void SceneManager::UninstallPresentHook() {
     }
 
     hookInstalled_ = false;
+    gameSwapChain_ = nullptr;
     SKSE::log::info("[SkyrimRenderer] Present hook uninstalled");
+}
+
+// ============================================================================
+// Device health
+// ============================================================================
+
+bool SceneManager::CheckDeviceHealth(const char* where) {
+    if (IsDeviceLost()) return false;
+
+    auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+    if (!renderer) return true;
+    auto* device = reinterpret_cast<ID3D11Device*>(renderer->GetRuntimeData().forwarder);
+    if (!device) return true;
+
+    HRESULT reason = device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason)) return true;
+
+    deviceLostReason_ = static_cast<uint32_t>(reason);
+    deviceLost_.store(true, std::memory_order_release);
+    SKSE::log::error("[SkyrimRenderer] D3D11 device removed (reason 0x{:08X}) after {}; "
+                     "rendering is off for the rest of the session",
+                     static_cast<uint32_t>(reason), where);
+    return false;
+}
+
+Result SceneManager::GuardedRender(RenderScene* scene, const char* where) {
+    if (!scene) return Result::InvalidHandle;
+    if (IsDeviceLost()) return Result::DeviceLost;
+
+    // Head previews: upload the caller-written vertex arrays that changed.
+    std::vector<ActorPreview*> heads;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& [id, actor] : actors_) {
+            if (actor && actor->IsHeadOnly() && &actor->GetScene() == scene) heads.push_back(actor.get());
+        }
+    }
+    for (auto* head : heads) head->FlushDrivenHead();
+
+    Result result = scene->Render();
+    if (!CheckDeviceHealth(where)) return Result::DeviceLost;
+    return result;
 }
 
 void SceneManager::RequestRender(SceneHandle scene) {
@@ -144,15 +313,22 @@ void SceneManager::SetRenderCompleteCallback(RenderCompleteCallback callback) {
     renderCompleteCallback_ = std::move(callback);
 }
 
-void SceneManager::ProcessPendingRenders(IDXGISwapChain* swapChain) {
+void SceneManager::ProcessPendingRenders() {
     // Two-phase async pipeline:
     //   Phase 1: Try to collect PREVIOUS frame's readback (non-blocking)
-    //   Phase 2: Render all pending composite scenes + at most one readback scene
+    //   Phase 2: Render all pending composite / texture scenes + at most one readback scene
     //
     // Scenes with a composite rect are drawn directly to the backbuffer (zero CPU cost).
-    // Scenes without a composite rect use async readback → callback (for export/fallback).
+    // Texture-mode scenes render into their texture and stop there.
+    // Any other scene uses async readback → callback (for export/fallback).
+    //
+    // The callback runs right here on the calling thread (Present hook or the
+    // consumer's main-thread Tick). Nothing in this path posts SKSE tasks: on VR
+    // a post from inside Present can deadlock the game (Magelight 0.30.1).
 
-    std::vector<SceneHandle> compositeHandles;
+    if (IsDeviceLost()) return;
+
+    std::vector<SceneHandle> gpuOnlyHandles;
     SceneHandle readbackHandle = SceneHandle::Invalid;
     RenderCompleteCallback callback;
     {
@@ -164,8 +340,10 @@ void SceneManager::ProcessPendingRenders(IDXGISwapChain* swapChain) {
             auto id = static_cast<uint32_t>(*it);
             if (!seen.insert(id).second) continue;
 
-            if (compositeRects_.contains(id)) {
-                compositeHandles.push_back(*it);
+            auto sceneIt = scenes_.find(id);
+            bool textureMode = sceneIt != scenes_.end() && sceneIt->second->IsTextureMode();
+            if (textureMode || compositeRects_.contains(id)) {
+                gpuOnlyHandles.push_back(*it);
             } else {
                 // Only the last readback scene wins (single readback slot)
                 if (!IsValid(readbackHandle)) {
@@ -197,13 +375,14 @@ void SceneManager::ProcessPendingRenders(IDXGISwapChain* swapChain) {
         }
     }
 
-    // Phase 2a: Render all composite scenes (GPU-only, no readback needed)
-    for (auto h : compositeHandles) {
+    // Phase 2a: Render all composite / texture scenes (GPU-only, no readback needed)
+    for (auto h : gpuOnlyHandles) {
         auto* scene = GetScene(h);
         if (scene) {
-            auto result = scene->Render();
+            auto result = GuardedRender(scene, "pending render");
+            if (result == Result::DeviceLost) return;
             if (Failed(result)) {
-                SKSE::log::error("[SkyrimRenderer] Frame render failed for composite scene {}",
+                SKSE::log::error("[SkyrimRenderer] Frame render failed for scene {}",
                                 static_cast<uint32_t>(h));
             }
         }
@@ -213,12 +392,12 @@ void SceneManager::ProcessPendingRenders(IDXGISwapChain* swapChain) {
     if (IsValid(readbackHandle)) {
         auto* scene = GetScene(readbackHandle);
         if (scene) {
-            auto result = scene->Render();
+            auto result = GuardedRender(scene, "pending readback render");
             if (Succeeded(result)) {
                 scene->BeginReadback();
                 readbackPending_ = true;
                 readbackScene_ = readbackHandle;
-            } else {
+            } else if (result != Result::DeviceLost) {
                 SKSE::log::error("[SkyrimRenderer] Frame render failed for scene {}",
                                 static_cast<uint32_t>(readbackHandle));
             }
@@ -413,13 +592,50 @@ ID3D11ShaderResourceView* SceneManager::Render(SceneHandle scene) {
     auto* s = GetScene(scene);
     if (!s) return nullptr;
 
-    Result result = s->Render();
+    Result result = GuardedRender(s, "Render");
     if (Failed(result)) {
         SKSE::log::error("[SkyrimRenderer] Render failed for scene {}", static_cast<uint32_t>(scene));
         return nullptr;
     }
 
     return s->GetRenderedTexture();
+}
+
+// ============================================================================
+// Texture mode
+// ============================================================================
+
+void SceneManager::SetSceneTextureMode(SceneHandle scene, bool enabled) {
+    if (auto* s = GetScene(scene)) {
+        s->SetTextureMode(enabled);
+        if (enabled) {
+            std::lock_guard lock(mutex_);
+            compositeRects_.erase(static_cast<uint32_t>(scene));
+        }
+    }
+}
+
+Result SceneManager::RenderToTexture(SceneHandle scene) {
+    auto* s = GetScene(scene);
+    if (!s) return Result::InvalidHandle;
+    return GuardedRender(s, "RenderToTexture");
+}
+
+bool SceneManager::GetSceneTexture(SceneHandle scene, SceneTextureInfo& out) {
+    out = {};
+    auto* s = GetScene(scene);
+    if (!s) return false;
+    out.srv = s->GetRenderedTexture();
+    out.texture = s->GetRenderedTexture2D();
+    out.width = s->GetWidth();
+    out.height = s->GetHeight();
+    return out.srv != nullptr && out.texture != nullptr;
+}
+
+bool SceneManager::RefreshLiveFace(ActorHandle actor) {
+    if (IsDeviceLost()) return false;
+    auto* a = GetActorPreview(actor);
+    return a ? a->RefreshLiveFace() : false;
 }
 
 Result SceneManager::ExportPNG(SceneHandle scene, const char* filePath) {
@@ -564,6 +780,25 @@ ActorHandle SceneManager::LoadActorPreview(SceneHandle scene, RE::FormID actorFo
     return static_cast<ActorHandle>(id);
 }
 
+ActorHandle SceneManager::LoadActorHead(SceneHandle scene, RE::FormID formID) {
+    auto* s = GetScene(scene);
+    if (!s) return ActorHandle::Invalid;
+
+    auto preview = std::make_unique<ActorPreview>(*s, formID, /*headOnly=*/true);
+    if (!preview->IsValid()) {
+        SKSE::log::error("[SkyrimRenderer] Failed to create head preview for 0x{:X}", formID);
+        return ActorHandle::Invalid;
+    }
+
+    std::lock_guard lock(mutex_);
+    uint32_t id = nextActorHandle_++;
+    uint32_t sceneId = static_cast<uint32_t>(scene);
+    actors_[id] = std::move(preview);
+    actorToScene_[id] = sceneId;
+    SKSE::log::info("[SkyrimRenderer] Created head preview {} for 0x{:X} in scene {}", id, formID, sceneId);
+    return static_cast<ActorHandle>(id);
+}
+
 ActorPreview* SceneManager::GetActorPreview(ActorHandle handle) {
     std::lock_guard lock(mutex_);
     auto it = actors_.find(static_cast<uint32_t>(handle));
@@ -700,8 +935,8 @@ void SceneManager::DestroyActorPreview(ActorHandle handle) {
 // Backbuffer Compositing
 // ============================================================================
 
-void SceneManager::CompositeAllScenes(IDXGISwapChain* swapChain) {
-    if (!swapChain) return;
+void SceneManager::CompositeAllScenes() {
+    if (IsDeviceLost()) return;
 
     // Snapshot ALL composite data under a single lock — scene jobs AND overlay
     // draws together. This prevents a race where the composite rect is removed
@@ -717,15 +952,23 @@ void SceneManager::CompositeAllScenes(IDXGISwapChain* swapChain) {
     std::vector<CompositeJob> jobs;
     std::vector<OverlayDraw> overlayDraws;
 
+    static uint32_t compositeBailCount = 0;
+
     {
         std::lock_guard lock(mutex_);
-        if (compositeRects_.empty() && overlays_.empty()) return;
+        if (compositeRects_.empty() && overlays_.empty()) {
+            if (++compositeBailCount % 300 == 1) {
+                SKSE::log::info("[SkyrimRenderer] CompositeAllScenes: no composite rects or overlays");
+            }
+            return;
+        }
 
         for (auto& [sceneId, rect] : compositeRects_) {
             auto it = scenes_.find(sceneId);
             if (it == scenes_.end()) continue;
 
             auto* scene = it->second.get();
+            if (scene->IsTextureMode()) continue;
             if (scene->GetRenderedTexture()) {
                 jobs.push_back({scene, rect});
             }
@@ -758,39 +1001,55 @@ void SceneManager::CompositeAllScenes(IDXGISwapChain* swapChain) {
         }
     }
 
-    if (jobs.empty() && overlayDraws.empty()) return;
+    if (jobs.empty() && overlayDraws.empty()) {
+        if (++compositeBailCount % 300 == 1) {
+            SKSE::log::info("[SkyrimRenderer] CompositeAllScenes: snapshot empty (rects existed but no rendered textures)");
+        }
+        return;
+    }
 
     // Get device + context
     auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-    if (!renderer) return;
+    if (!renderer) {
+        SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: BSGraphics::Renderer not available");
+        return;
+    }
     auto& rendererData = renderer->GetRuntimeData();
     auto* device = reinterpret_cast<ID3D11Device*>(rendererData.forwarder);
     auto* ctx = reinterpret_cast<ID3D11DeviceContext*>(rendererData.context);
-    if (!device || !ctx) return;
-
-    if (!quadRenderer_.IsInitialized()) {
-        if (Failed(quadRenderer_.Initialize(device))) return;
+    if (!device || !ctx) {
+        SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: D3D11 device={} context={}", (void*)device, (void*)ctx);
+        return;
     }
 
-    // Acquire backbuffer ONCE for the entire compositing pass
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
-    HRESULT hr = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                       reinterpret_cast<void**>(backbuffer.GetAddressOf()));
-    if (FAILED(hr) || !backbuffer) return;
+    if (!quadRenderer_.IsInitialized()) {
+        if (Failed(quadRenderer_.Initialize(device))) {
+            SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: ScreenQuadRenderer init failed");
+            return;
+        }
+    }
+
+    // Draw into the engine's kFRAMEBUFFER render target, never swapChain->GetBuffer(0).
+    // The engine owns that view, so there is no back-buffer reference to release
+    // (an over-release freed the game's buffer on Community Shaders 1.6-1.8.3), and
+    // a FLIP_DISCARD / proxied swapchain cannot hand back a stale buffer.
+    auto& framebufferRT = rendererData.renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+    if (!framebufferRT.texture || !framebufferRT.RTV) {
+        SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: kFRAMEBUFFER not available (texture={} RTV={})",
+                         (void*)framebufferRT.texture, (void*)framebufferRT.RTV);
+        return;
+    }
 
     D3D11_TEXTURE2D_DESC bbDesc;
-    backbuffer->GetDesc(&bbDesc);
-
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbufferRTV;
-    hr = device->CreateRenderTargetView(backbuffer.Get(), nullptr, &backbufferRTV);
-    if (FAILED(hr) || !backbufferRTV) return;
+    framebufferRT.texture->GetDesc(&bbDesc);
+    ID3D11RenderTargetView* backbufferRTV = framebufferRT.RTV;
 
     // Single state guard for the entire compositing pass
     DX11StateGuard stateGuard(ctx);
 
     // 1. Scene quads first (background)
     for (auto& job : jobs) {
-        CompositeToBackbuffer(ctx, backbufferRTV.Get(), bbDesc.Width, bbDesc.Height,
+        CompositeToBackbuffer(ctx, backbufferRTV, bbDesc.Width, bbDesc.Height,
                               job.scene, job.rect);
     }
 
@@ -798,7 +1057,7 @@ void SceneManager::CompositeAllScenes(IDXGISwapChain* swapChain) {
     static uint32_t compositeFrameCount = 0;
     if (++compositeFrameCount % 300 == 1) {
         SKSE::log::info(
-            "SkyrimRenderer::Composite sceneQuads={} overlays={} bb={}x{}",
+            "SkyrimRenderer::Composite sceneQuads={} overlays={} fb={}x{} (kFRAMEBUFFER)",
             jobs.size(), overlayDraws.size(), bbDesc.Width, bbDesc.Height);
         for (auto& draw : overlayDraws) {
             SKSE::log::info(
@@ -808,9 +1067,11 @@ void SceneManager::CompositeAllScenes(IDXGISwapChain* swapChain) {
     }
 
     for (auto& draw : overlayDraws) {
-        quadRenderer_.Draw(ctx, backbufferRTV.Get(), draw.srv, draw.rect,
+        quadRenderer_.Draw(ctx, backbufferRTV, draw.srv, draw.rect,
                            bbDesc.Width, bbDesc.Height, true /* premultiplied */);
     }
+
+    CheckDeviceHealth("composite");
 }
 
 void SceneManager::CompositeToBackbuffer(ID3D11DeviceContext* ctx,

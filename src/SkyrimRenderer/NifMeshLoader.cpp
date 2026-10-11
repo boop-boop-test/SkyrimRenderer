@@ -1,5 +1,6 @@
 #include <RE/Skyrim.h>
 #include <RE/B/BSResourceNiBinaryStream.h>
+#include "SkyrimRenderer/GameFileReader.h"
 #include <SKSE/SKSE.h>
 
 #include "SkyrimRenderer/NifMeshLoader.h"
@@ -87,36 +88,8 @@ static std::string GetBodyTriPath(nifly::NifFile& nif) {
 // ============================================================================
 
 static bool ReadGameFile(const std::string& path, std::string& outData, size_t sizeHint = 0) {
-    RE::BSResourceNiBinaryStream stream(path.c_str());
-    if (!stream.good()) {
-        SKSE::log::warn("[NifMeshLoader] BSResourceNiBinaryStream failed to open: {}", path);
-        return false;
-    }
-
-    // Read file in chunks. NiBinaryStream::read returns bool (all bytes read).
-    // BufferInfo.totalSize is 0 for BSA-backed streams, so we can't pre-allocate exact size.
-    outData.clear();
-    if (sizeHint > 0) outData.reserve(sizeHint);
-    constexpr uint32_t kChunkSize = 65536;  // 64 KB — 16x fewer syscalls than 4 KB
-    char buf[kChunkSize];
-    while (stream.good()) {
-        uint32_t posBefore = stream.tell();
-        if (stream.read(buf, kChunkSize)) {
-            // Full chunk read
-            outData.append(buf, kChunkSize);
-        } else {
-            // Partial read or EOF — check how far we got
-            uint32_t posAfter = stream.tell();
-            uint32_t bytesRead = posAfter - posBefore;
-            if (bytesRead > 0 && bytesRead <= kChunkSize) {
-                outData.append(buf, bytesRead);
-            }
-            break;
-        }
-    }
-
-    if (outData.empty()) {
-        SKSE::log::warn("[NifMeshLoader] File was empty or unreadable: {}", path);
+    if (!SkyrimRenderer::ReadWholeGameFile(path.c_str(), outData, sizeHint)) {
+        SKSE::log::warn("[NifMeshLoader] Could not open or read: {}", path);
         return false;
     }
 
@@ -1646,9 +1619,20 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         // Defer loading until after shader type is determined below.
 
         mesh.name = shape->name.get();
+        {
+            const auto local = shape->GetTransformToParent();
+            mesh.shapeLocal.translation[0] = local.translation.x;
+            mesh.shapeLocal.translation[1] = local.translation.y;
+            mesh.shapeLocal.translation[2] = local.translation.z;
+            mesh.shapeLocal.scale = local.scale;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    mesh.shapeLocal.rotation.m[r][c] = local.rotation[r][c];
+        }
         mesh.vertexCount = static_cast<uint32_t>(vertices.size());
         mesh.indexCount = static_cast<uint32_t>(indices.size());
         mesh.vertexStride = kPreviewVertexStride;
+        mesh.indices = indices;
 
         // Store TRI morph targets in the mesh for later GPU morph buffer creation.
         if (nifTriLoaded) {

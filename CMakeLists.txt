@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.0.0
+    VERSION 1.4.0
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
-    LANGUAGES CXX)
+    LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,6 +80,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/SkyPatcherService.h
     include/SkyrimRenderer/SkyrimRendererExport.h
     include/SkyrimRenderer/SkyrimRendererAPI.h
+    include/SkyrimRenderer/SkyrimRendererLoader.h
+    include/SkyrimRenderer/GameFileReader.h
     include/SkyrimRenderer/PostProcessPass.h
 )
 
@@ -109,19 +111,22 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
 )
 
-# When consumed by a parent project (DressCode), build as static lib.
-# When built standalone (top-level project), build as a shared DLL.
-if(PROJECT_IS_TOP_LEVEL)
-    add_library(skyrim-renderer-lib SHARED
-        ${SKYRIM_RENDERER_HEADERS} ${SKYRIM_RENDERER_SOURCES}
-        src/SkyrimRenderer/DllMain.cpp)
-    target_compile_definitions(skyrim-renderer-lib PRIVATE SKYRIMRENDERER_EXPORTS)
-    set_target_properties(skyrim-renderer-lib PROPERTIES OUTPUT_NAME "SkyrimRenderer")
-else()
-    add_library(skyrim-renderer-lib STATIC
-        ${SKYRIM_RENDERER_HEADERS} ${SKYRIM_RENDERER_SOURCES})
-    target_compile_definitions(skyrim-renderer-lib PUBLIC SKYRIMRENDERER_STATIC)
-endif()
+# Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at
+# runtime through SkyrimRendererLoader.h, which picks the newest installed
+# build, so there is exactly one renderer per game process.
+# PROJECT_VERSION is the build version the loader compares (Windows file
+# version resource); bump it with every release.
+configure_file(cmake/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
+add_library(skyrim-renderer-lib SHARED
+    ${SKYRIM_RENDERER_HEADERS} ${SKYRIM_RENDERER_SOURCES}
+    src/SkyrimRenderer/DllMain.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
+target_compile_definitions(skyrim-renderer-lib PRIVATE
+    SKYRIMRENDERER_EXPORTS
+    SKYRIMRENDERER_BUILD_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    SKYRIMRENDERER_BUILD_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    SKYRIMRENDERER_BUILD_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+set_target_properties(skyrim-renderer-lib PROPERTIES OUTPUT_NAME "SkyrimRenderer")
 
 target_include_directories(skyrim-renderer-lib PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -142,10 +147,9 @@ set_target_properties(skyrim-renderer-lib PROPERTIES
     CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
+    # C++ only: the target also compiles version.rc, and rc.exe rejects these.
     target_compile_options(skyrim-renderer-lib PRIVATE
-        "/utf-8" "/Zi" "/EHsc" "/Zc:preprocessor" "/WX"
-        "/experimental:external" "/external:anglebrackets" "/external:W0"
-        "/wd4200")
+        "$<$<COMPILE_LANGUAGE:CXX>:/utf-8;/Zi;/EHsc;/Zc:preprocessor;/WX;/experimental:external;/external:anglebrackets;/external:W0;/wd4200>")
 endif()
 
 target_precompile_headers(skyrim-renderer-lib PRIVATE

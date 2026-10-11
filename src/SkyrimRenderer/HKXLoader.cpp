@@ -4,6 +4,7 @@
 #include "SkyrimRenderer/SplineDecompressor.h"
 
 #include <RE/B/BSResourceNiBinaryStream.h>
+#include "SkyrimRenderer/GameFileReader.h"
 
 #include <chrono>
 #include <cmath>
@@ -16,30 +17,11 @@ namespace {
 
 /// Read an HKX file from BSA archives or loose files into a byte buffer.
 bool ReadGameFile(const std::string& path, std::vector<uint8_t>& outData) {
-    RE::BSResourceNiBinaryStream stream(path.c_str());
-    if (!stream.good()) {
-        SKSE::log::warn("[HKXLoader] BSResourceNiBinaryStream failed to open: {}", path);
+    if (!SkyrimRenderer::ReadWholeGameFile(path.c_str(), outData)) {
+        SKSE::log::warn("[HKXLoader] Could not open or read: {}", path);
         return false;
     }
-
-    outData.clear();
-    constexpr uint32_t kChunkSize = 4096;
-    uint8_t buf[kChunkSize];
-    while (stream.good()) {
-        uint32_t posBefore = stream.tell();
-        if (stream.read(buf, kChunkSize)) {
-            outData.insert(outData.end(), buf, buf + kChunkSize);
-        } else {
-            uint32_t posAfter = stream.tell();
-            uint32_t bytesRead = posAfter - posBefore;
-            if (bytesRead > 0 && bytesRead <= kChunkSize) {
-                outData.insert(outData.end(), buf, buf + bytesRead);
-            }
-            break;
-        }
-    }
-
-    return !outData.empty();
+    return true;
 }
 
 // ── Conversion Helpers ──────────────────────────────────────────────────────

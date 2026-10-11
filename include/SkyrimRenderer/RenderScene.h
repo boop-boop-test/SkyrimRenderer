@@ -118,7 +118,15 @@ public:
 
     Result Render();
     ID3D11ShaderResourceView* GetRenderedTexture() const;
+    ID3D11Texture2D* GetRenderedTexture2D() const;
     Result ReadbackPixels(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight);
+
+    /// Texture mode: the scene feeds a texture consumer (a UI host sampling the
+    /// SRV) instead of the backbuffer composite or CPU readback. The render
+    /// target is cleared with a premultiplied background so the output alpha
+    /// contract is "sRGB-encoded, premultiplied" everywhere blending happens.
+    void SetTextureMode(bool enabled);
+    bool IsTextureMode() const { return textureMode_; }
 
     /// Kick off async GPU copy for readback (call after Render). Non-blocking.
     void BeginReadback();
@@ -187,6 +195,9 @@ public:
     /// Get the D3D11 device (for external GPU resource creation).
     ID3D11Device* GetDevice() const { return device_; }
 
+    /// Get the engine's immediate context (main-thread use only).
+    ID3D11DeviceContext* GetDeviceContext() const { return context_; }
+
     // ── Dynamic Vertex Buffers (for animation) ──────────────────────────────
 
     /// Convert a mesh's vertex buffer from immutable to dynamic.
@@ -252,6 +263,9 @@ private:
 
     // ENB
     ENBMode enbMode_ = ENBMode::Auto;
+
+    // Texture-consumer mode (premultiplied clear, no readback/composite)
+    bool textureMode_ = false;
 
     // Frame overlay
     FrameOverlayRenderer frameOverlay_;

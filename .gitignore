@@ -12,3 +12,6 @@ _deps/
 contrib/Distribution/**/*.dll
 contrib/Distribution/**/*.pdb
 contrib/*.zip
+
+# Local deploy target
+BuildAndPackage.local.ps1

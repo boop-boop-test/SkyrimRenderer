@@ -180,9 +180,19 @@ struct LoadedMesh {
     /// Empty for unskinned meshes (no re-posing needed).
     std::vector<PreviewVertex> bindPoseVertices;
 
+    /// CPU copy of the (partition-filtered) index list that backs indexBuffer.
+    /// Needed to recompute normals when bind-pose positions are replaced
+    /// (player live-face patch); the GPU buffer is immutable.
+    std::vector<uint16_t> indices;
+
     /// Skinning data (bone weights, bone names, transforms).
     /// Empty if the mesh is not skinned.
     MeshSkinData skinData;
+
+    /// The shape's local transform as stored in its NIF (not applied to the
+    /// vertices: skinned shapes are placed by skinData). Reported to consumers
+    /// that drive vertices so they can check which frame the data is in.
+    BoneTransform shapeLocal;
 
     /// Whether this mesh uses a dynamic D3D11 vertex buffer (for animation).
     /// Static meshes use D3D11_USAGE_IMMUTABLE; dynamic uses D3D11_USAGE_DYNAMIC.

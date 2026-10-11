@@ -1045,7 +1045,13 @@ Result RenderScene::Render() {
     if (bsState) bsState->SetCameraData(gameCamera, 0);
 
     // ── Clear render target ──────────────────────────────────────────────
-    float clearColor[4] = {backgroundColor_.r, backgroundColor_.g, backgroundColor_.b, backgroundColor_.a};
+    // In texture mode the clear is premultiplied: the alpha-blend state is
+    // (SRC_ALPHA, INV_SRC_ALPHA / ONE, INV_SRC_ALPHA), which keeps a
+    // premultiplied destination premultiplied, and opaque writes carry alpha 1.
+    float bgA = backgroundColor_.a;
+    float bgMul = textureMode_ ? bgA : 1.0f;
+    float clearColor[4] = {backgroundColor_.r * bgMul, backgroundColor_.g * bgMul,
+                           backgroundColor_.b * bgMul, bgA};
     renderTarget_.Clear(context_, clearColor);
 
     // Update scene graph only when geometry changed (not on camera-only updates)
@@ -1239,6 +1245,15 @@ Result RenderScene::Render() {
 
 ID3D11ShaderResourceView* RenderScene::GetRenderedTexture() const {
     return renderTarget_.GetSRV();
+}
+
+ID3D11Texture2D* RenderScene::GetRenderedTexture2D() const {
+    return renderTarget_.GetTexture();
+}
+
+void RenderScene::SetTextureMode(bool enabled) {
+    std::lock_guard lock(mutex_);
+    textureMode_ = enabled;
 }
 
 Result RenderScene::ReadbackPixels(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight) {

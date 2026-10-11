@@ -13,12 +13,14 @@
 #include <RE/B/BSDynamicTriShape.h>
 #include <RE/B/BSLightingShaderMaterialBase.h>
 #include <RE/B/BSResourceNiBinaryStream.h>
+#include "SkyrimRenderer/GameFileReader.h"
 #include <RE/B/BSShaderTextureSet.h>
 #include <RE/N/NiSkinPartition.h>
 #include <RE/N/NiStream.h>
 #include <SKSE/SKSE.h>
 
 #include "SkyrimRenderer/NifMeshLoader.h"
+#include "SkyrimRenderer/SkyrimRendererAPI.h"
 #include "SkyrimRenderer/SkyPatcherService.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/HKXLoader.h"
@@ -268,13 +270,36 @@ static RE::NiPointer<RE::NiNode> LoadModel(const std::string& meshPath) {
 // Construction / Destruction
 // ============================================================================
 
-ActorPreview::ActorPreview(RenderScene& scene, RE::FormID actorFormID)
-    : scene_(scene), actorFormID_(actorFormID) {
+ActorPreview::ActorPreview(RenderScene& scene, RE::FormID actorFormID, bool headOnly)
+    : scene_(scene), actorFormID_(actorFormID), headOnly_(headOnly) {
 
     // Look up the actor form
     auto* form = RE::TESForm::LookupByID(actorFormID);
     if (!form) {
         SKSE::log::error("[SkyrimRenderer] ActorPreview: FormID 0x{:X} not found", actorFormID);
+        return;
+    }
+
+    if (headOnly_) {
+        auto* npc = form->As<RE::TESNPC>();
+        if (auto* actor = form->As<RE::Actor>()) npc = actor->GetActorBase();
+        if (!npc) {
+            SKSE::log::error("[SkyrimRenderer] ActorPreview: FormID 0x{:X} is not an actor or NPC", actorFormID);
+            return;
+        }
+        baseNPC_ = npc;
+        actorWeight_ = npc->weight;
+        if (Failed(LoadHeadOnly(npc))) {
+            SKSE::log::error("[SkyrimRenderer] ActorPreview: no drivable head for 0x{:X}", actorFormID);
+            actorNode_ = nullptr;
+            return;
+        }
+        sceneNodeHandle_ = scene_.AddNode(actorNode_.get());
+        SKSE::log::info("[SkyrimRenderer] Head preview created for 0x{:X} ('{}'): {} shapes, {}",
+                        actorFormID, npc->GetFullName(), drivenShapes_.size(),
+                        !gpuPose_.empty()          ? "on the NIF bind pose"
+                        : HeadUsesNifBindPose()    ? "drawn as stored (NIF bind pose failed)"
+                                                   : "drawn as stored (player live face)");
         return;
     }
 
@@ -423,6 +448,54 @@ Result ActorPreview::CloneFromLoaded(RE::Actor* actor) {
 }
 
 // ============================================================================
+// Actor Loading — Head only (drivable head)
+// ============================================================================
+
+Result ActorPreview::LoadHeadOnly(RE::TESNPC* npc) {
+    auto* race = npc ? npc->GetRace() : nullptr;
+    if (!race) return Result::InvalidParameter;
+
+    const bool isFemale = npc->IsFemale();
+    auto& skelModel = race->skeletonModels[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
+    skeletonNifPath_ = std::string("meshes\\") + skelModel.model.c_str();
+    skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
+
+    // Dummy root (rendering goes through the nifly meshes, not the scene graph)
+    auto* rootNode = RE::NiNode::Create(0);
+    if (!rootNode) return Result::OutOfMemory;
+    actorNode_ = RE::NiPointer<RE::NiNode>(rootNode);
+    actorNode_->name = "SkyrimRenderer_HeadRoot";
+
+    useGPUSkinning_ = true;
+    RebuildMeshes({});
+    if (drivenShapes_.empty()) return Result::InvalidParameter;
+
+    // GPU-skinned shapes keep their NIF's skin-space vertices and are drawn
+    // skinned only while the scene has a bone pose, but every camera preset
+    // fits the bounds posed on the race skeleton at load. A head has no
+    // animation, so it gets that skeleton's bind pose: vanilla FaceGen NIFs
+    // store their vertices in the head bone's skin space (~115 units below the
+    // posed head) and were drawn out of frame without one.
+    if (HeadUsesNifBindPose()) ApplyNifBindPose();
+    return Result::Success;
+}
+
+bool ActorPreview::HeadUsesNifBindPose() const {
+    // The player's live face is uploaded as stored and its bounds are taken
+    // from those positions, so it keeps the unposed draw it is framed for.
+    return headOnly_ && headSource_.source != SKYRIMRENDERER_HEAD_SOURCE_PLAYER;
+}
+
+void ActorPreview::ResetGPUSkinningPose() {
+    if (HeadUsesNifBindPose()) {
+        ApplyNifBindPose();
+        return;
+    }
+    gpuPose_.clear();
+    scene_.SetGPUSkinningPose(nullptr);
+}
+
+// ============================================================================
 // Actor Loading — Unloaded Actor (from disk)
 // ============================================================================
 
@@ -517,6 +590,8 @@ Result ActorPreview::LoadFromDisk(RE::TESNPC* npc) {
 // ============================================================================
 
 Result ActorPreview::EquipItem(RE::FormID armorFormID) {
+    // A head preview's meshes back caller-held vertex arrays: never rebuild them.
+    if (headOnly_) return Result::InvalidParameter;
     std::lock_guard lock(mutex_);
 
     if (!actorNode_ || !baseNPC_) return Result::InvalidHandle;
@@ -591,6 +666,8 @@ Result ActorPreview::EquipItem(RE::FormID armorFormID) {
 }
 
 Result ActorPreview::UnequipItem(RE::FormID armorFormID) {
+    // A head preview's meshes back caller-held vertex arrays: never rebuild them.
+    if (headOnly_) return Result::InvalidParameter;
     std::lock_guard lock(mutex_);
 
     if (!actorNode_) return Result::InvalidHandle;
@@ -614,6 +691,8 @@ Result ActorPreview::UnequipItem(RE::FormID armorFormID) {
 }
 
 Result ActorPreview::EquipOutfit(const std::vector<RE::FormID>& armorFormIDs, bool replaceAll) {
+    // A head preview's meshes back caller-held vertex arrays: never rebuild them.
+    if (headOnly_) return Result::InvalidParameter;
     std::lock_guard lock(mutex_);
 
     if (!actorNode_ || !baseNPC_) return Result::InvalidHandle;
@@ -673,6 +752,8 @@ Result ActorPreview::EquipOutfit(const std::vector<RE::FormID>& armorFormIDs, bo
 }
 
 void ActorPreview::UnequipAll() {
+    // A head preview's meshes back caller-held vertex arrays: never rebuild them.
+    if (headOnly_) return;
     std::lock_guard lock(mutex_);
 
     if (!actorNode_) return;
@@ -836,6 +917,8 @@ void ActorPreview::ClearMorphs() {
 }
 
 void ActorPreview::RebuildWithCurrentOutfit() {
+    // A head preview's meshes back caller-held vertex arrays: never rebuild them.
+    if (headOnly_) return;
     std::lock_guard lock(mutex_);
 
     if (!actorNode_ || !baseNPC_) return;
@@ -864,8 +947,7 @@ Result ActorPreview::SetPose(const char* animationPath) {
         // Reset to default bind pose
         currentPose_.clear();
         if (useGPUSkinning_) {
-            gpuPose_.clear();
-            scene_.SetGPUSkinningPose(nullptr);
+            ResetGPUSkinningPose();
         } else {
             ResetToBindPose();
         }
@@ -1027,8 +1109,7 @@ void ActorPreview::StopAnimation() {
     if (animController_) {
         animController_->Stop();
         if (useGPUSkinning_) {
-            gpuPose_.clear();
-            scene_.SetGPUSkinningPose(nullptr);
+            ResetGPUSkinningPose();
         } else {
             ResetToBindPose();
         }
@@ -1309,17 +1390,17 @@ RE::NiNode* ActorPreview::FindBone(const char* boneName) const {
 // (which has proper UVs, normals, skinning, textures) and patches positions after.
 // ============================================================================
 
-bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale) {
+bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet) {
     (void)skelPath; (void)isFemale;  // unused now — we just collect positions
     auto* player = RE::PlayerCharacter::GetSingleton();
     if (!player || !player->Is3DLoaded()) {
-        SKSE::log::warn("[SkyrimRenderer] Player not loaded, cannot extract face from live 3D");
+        if (!quiet) SKSE::log::warn("[SkyrimRenderer] Player not loaded, cannot extract face from live 3D");
         return false;
     }
 
     auto* faceNode = player->GetFaceNode();
     if (!faceNode) {
-        SKSE::log::warn("[SkyrimRenderer] Player has no face node");
+        if (!quiet) SKSE::log::warn("[SkyrimRenderer] Player has no face node");
         return false;
     }
 
@@ -1329,13 +1410,13 @@ bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool i
         auto* child = faceNode->GetChildren()[i].get();
         if (child) faceChildNames.insert(std::string(child->name.c_str()));
     }
-    SKSE::log::info("[SkyrimRenderer] Player face node has {} children", faceChildNames.size());
+    if (!quiet) SKSE::log::info("[SkyrimRenderer] Player face node has {} children", faceChildNames.size());
 
     // Walk the full actor 3D tree to find BSDynamicTriShape geometry with morphed positions
     auto* actor3D = player->Get3D(false);
     if (!actor3D) actor3D = player->Get3D(true);
     if (!actor3D) {
-        SKSE::log::warn("[SkyrimRenderer] Player has no 3D");
+        if (!quiet) SKSE::log::warn("[SkyrimRenderer] Player has no 3D");
         return false;
     }
 
@@ -1364,8 +1445,10 @@ bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool i
                     }
 
                     std::string name = obj->name.c_str();
-                    SKSE::log::info("[SkyrimRenderer] Collected {} morphed positions for '{}'",
-                                    numVerts, name);
+                    if (!quiet) {
+                        SKSE::log::info("[SkyrimRenderer] Collected {} morphed positions for '{}'",
+                                        numVerts, name);
+                    }
                     playerFaceMorphPositions_[name] = std::move(positions);
                 }
             }
@@ -1382,9 +1465,431 @@ bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool i
 
     walkTree(actor3D);
 
-    SKSE::log::info("[SkyrimRenderer] Collected morphed positions for {} face shapes",
-                    playerFaceMorphPositions_.size());
+    if (!quiet) {
+        SKSE::log::info("[SkyrimRenderer] Collected morphed positions for {} face shapes",
+                        playerFaceMorphPositions_.size());
+    }
     return !playerFaceMorphPositions_.empty();
+}
+
+// Build the full SkinnedVertex array for a GPU-skinned mesh from its bind-pose
+// vertices plus the skin weights kept in skinData (the immutable VB made at load
+// time is the only other place the weights live).
+static void FillSkinnedVertices(const LoadedMesh& mesh, SkinnedVertex* out) {
+    for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
+        const auto& bp = mesh.bindPoseVertices[v];
+        auto& sv = out[v];
+        sv.position[0] = bp.position[0];
+        sv.position[1] = bp.position[1];
+        sv.position[2] = bp.position[2];
+        sv.normal[0] = bp.normal[0];
+        sv.normal[1] = bp.normal[1];
+        sv.normal[2] = bp.normal[2];
+        sv.uv[0] = bp.uv[0];
+        sv.uv[1] = bp.uv[1];
+        sv.color[0] = bp.color[0];
+        sv.color[1] = bp.color[1];
+        sv.color[2] = bp.color[2];
+        sv.color[3] = bp.color[3];
+        sv.tangent[0] = bp.tangent[0];
+        sv.tangent[1] = bp.tangent[1];
+        sv.tangent[2] = bp.tangent[2];
+        sv.tangent[3] = bp.tangent[3];
+        if (v < mesh.skinData.vertexWeights.size()) {
+            const auto& sw = mesh.skinData.vertexWeights[v];
+            sv.boneIndices[0] = sw.boneIndices[0];
+            sv.boneIndices[1] = sw.boneIndices[1];
+            sv.boneIndices[2] = sw.boneIndices[2];
+            sv.boneIndices[3] = sw.boneIndices[3];
+            sv.boneWeights[0] = sw.weights[0];
+            sv.boneWeights[1] = sw.weights[1];
+            sv.boneWeights[2] = sw.weights[2];
+            sv.boneWeights[3] = sw.weights[3];
+        } else {
+            sv.boneIndices[0] = 0; sv.boneIndices[1] = 0;
+            sv.boneIndices[2] = 0; sv.boneIndices[3] = 0;
+            sv.boneWeights[0] = 1.0f; sv.boneWeights[1] = 0.0f;
+            sv.boneWeights[2] = 0.0f; sv.boneWeights[3] = 0.0f;
+        }
+    }
+}
+
+// Recompute area-weighted vertex normals from the current bind-pose positions
+// and re-orthogonalize the stored tangents against them. The live patch only
+// replaces positions, so the NIF's baked normals describe the un-morphed face.
+// Triangle winding is taken from the NIF's own normals (majority vote) rather
+// than assumed, so a mesh with flipped winding still lights the right way.
+static void RecomputeNormals(LoadedMesh& mesh) {
+    if (mesh.indices.size() < 3 || mesh.bindPoseVertices.size() != mesh.vertexCount) return;
+    auto& verts = mesh.bindPoseVertices;
+
+    std::vector<std::array<float, 3>> accum(mesh.vertexCount, {0.0f, 0.0f, 0.0f});
+    for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        uint16_t ia = mesh.indices[i], ib = mesh.indices[i + 1], ic = mesh.indices[i + 2];
+        if (ia >= mesh.vertexCount || ib >= mesh.vertexCount || ic >= mesh.vertexCount) continue;
+        const float* pa = verts[ia].position;
+        const float* pb = verts[ib].position;
+        const float* pc = verts[ic].position;
+        float e1[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
+        float e2[3] = {pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]};
+        float n[3] = {e1[1] * e2[2] - e1[2] * e2[1],
+                      e1[2] * e2[0] - e1[0] * e2[2],
+                      e1[0] * e2[1] - e1[1] * e2[0]};  // area-weighted
+        for (uint16_t idx : {ia, ib, ic}) {
+            accum[idx][0] += n[0];
+            accum[idx][1] += n[1];
+            accum[idx][2] += n[2];
+        }
+    }
+
+    double vote = 0.0;
+    for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
+        vote += accum[v][0] * verts[v].normal[0] + accum[v][1] * verts[v].normal[1] +
+                accum[v][2] * verts[v].normal[2];
+    }
+    const float sign = vote < 0.0 ? -1.0f : 1.0f;
+
+    for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
+        auto& vert = verts[v];
+        float nx = accum[v][0] * sign, ny = accum[v][1] * sign, nz = accum[v][2] * sign;
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len <= 1e-8f) continue;  // isolated vertex: keep the NIF normal
+        nx /= len; ny /= len; nz /= len;
+        vert.normal[0] = nx; vert.normal[1] = ny; vert.normal[2] = nz;
+
+        float tx = vert.tangent[0], ty = vert.tangent[1], tz = vert.tangent[2];
+        float d = tx * nx + ty * ny + tz * nz;
+        tx -= nx * d; ty -= ny * d; tz -= nz * d;
+        float tlen = std::sqrt(tx * tx + ty * ty + tz * tz);
+        if (tlen > 1e-6f) {
+            vert.tangent[0] = tx / tlen;
+            vert.tangent[1] = ty / tlen;
+            vert.tangent[2] = tz / tlen;
+        }
+    }
+}
+
+bool ActorPreview::UploadMeshBindPose(uint32_t meshIndex) {
+    auto& allMeshes = scene_.GetLoadedMeshesMut();
+    if (meshIndex >= allMeshes.size()) return false;
+    auto& mesh = allMeshes[meshIndex];
+    if (mesh.bindPoseVertices.size() != mesh.vertexCount || mesh.vertexCount == 0) return false;
+
+    auto* device = scene_.GetDevice();
+    if (device && mesh.isGPUSkinned) {
+        const UINT byteWidth = static_cast<UINT>(mesh.vertexCount * sizeof(SkinnedVertex));
+        uploadScratch_.resize(byteWidth);
+        auto* verts = reinterpret_cast<SkinnedVertex*>(uploadScratch_.data());
+        FillSkinnedVertices(mesh, verts);
+
+        // The loader's VB is immutable. The first upload replaces it with a
+        // dynamic one so later uploads are a Map/WRITE_DISCARD, not a buffer
+        // creation. mesh.isDynamic stays false on purpose: that flag means
+        // "PreviewVertex-format dynamic buffer" to the CPU skin path.
+        D3D11_BUFFER_DESC curDesc = {};
+        if (mesh.vertexBuffer) mesh.vertexBuffer->GetDesc(&curDesc);
+        const bool reusable = mesh.vertexBuffer && curDesc.Usage == D3D11_USAGE_DYNAMIC &&
+                              curDesc.ByteWidth == byteWidth &&
+                              (curDesc.CPUAccessFlags & D3D11_CPU_ACCESS_WRITE);
+
+        auto* ctx = scene_.GetDeviceContext();
+        if (reusable && ctx) {
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            if (FAILED(ctx->Map(mesh.vertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+            std::memcpy(mapped.pData, verts, byteWidth);
+            ctx->Unmap(mesh.vertexBuffer.Get(), 0);
+            return true;
+        }
+        D3D11_BUFFER_DESC vbDesc = {};
+        vbDesc.ByteWidth = byteWidth;
+        vbDesc.Usage = D3D11_USAGE_DYNAMIC;
+        vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_SUBRESOURCE_DATA vbData = {};
+        vbData.pSysMem = verts;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> newVB;
+        if (FAILED(device->CreateBuffer(&vbDesc, &vbData, newVB.ReleaseAndGetAddressOf()))) return false;
+        mesh.vertexBuffer = std::move(newVB);
+        return true;
+    }
+    if (mesh.isDynamic) {
+        // CPU skin path (not used by current actor construction): bind pose only.
+        return scene_.UpdateMeshVertices(meshIndex, mesh.bindPoseVertices);
+    }
+    return false;
+}
+
+bool ActorPreview::UploadLiveFacePositions(bool quiet) {
+    auto& allMeshes = scene_.GetLoadedMeshesMut();
+    uint32_t patchedCount = 0;
+
+    for (const auto& [meshName, liveName] : liveFaceBindings_) {
+        auto posIt = playerFaceMorphPositions_.find(liveName);
+        if (posIt == playerFaceMorphPositions_.end()) continue;
+        const auto& morphPositions = posIt->second;
+
+        for (uint32_t meshIndex = 0; meshIndex < allMeshes.size(); ++meshIndex) {
+            auto& mesh = allMeshes[meshIndex];
+            if (mesh.name != meshName) continue;
+            if (morphPositions.size() != mesh.vertexCount ||
+                mesh.bindPoseVertices.size() != mesh.vertexCount) {
+                continue;
+            }
+
+            for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
+                mesh.bindPoseVertices[v].position[0] = morphPositions[v][0];
+                mesh.bindPoseVertices[v].position[1] = morphPositions[v][1];
+                mesh.bindPoseVertices[v].position[2] = morphPositions[v][2];
+            }
+            RecomputeNormals(mesh);
+
+            const bool uploaded = UploadMeshBindPose(meshIndex);
+
+            if (uploaded) {
+                mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = FLT_MAX;
+                mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] = -FLT_MAX;
+                for (const auto& pos : morphPositions) {
+                    mesh.boundsMin[0] = std::min(mesh.boundsMin[0], pos[0]);
+                    mesh.boundsMin[1] = std::min(mesh.boundsMin[1], pos[1]);
+                    mesh.boundsMin[2] = std::min(mesh.boundsMin[2], pos[2]);
+                    mesh.boundsMax[0] = std::max(mesh.boundsMax[0], pos[0]);
+                    mesh.boundsMax[1] = std::max(mesh.boundsMax[1], pos[1]);
+                    mesh.boundsMax[2] = std::max(mesh.boundsMax[2], pos[2]);
+                }
+                patchedCount++;
+                if (!quiet) {
+                    SKSE::log::info("[SkyrimRenderer] Patched '{}' with {} morphed positions",
+                                    mesh.name, morphPositions.size());
+                }
+            }
+            break;
+        }
+    }
+
+    if (!quiet) {
+        SKSE::log::info("[SkyrimRenderer] Applied face morph positions to {} meshes", patchedCount);
+    }
+    return patchedCount > 0;
+}
+
+bool ActorPreview::RefreshLiveFace() {
+    std::lock_guard lock(mutex_);
+    // Head previews are driven by the caller's arrays instead.
+    if (headOnly_) return false;
+    if (!baseNPC_ || !baseNPC_->IsPlayer() || liveFaceBindings_.empty()) return false;
+    if (!ExtractPlayerFaceFromLive("", false, /*quiet=*/true)) return false;
+    bool ok = UploadLiveFacePositions(/*quiet=*/true);
+    playerFaceMorphPositions_.clear();
+    return ok;
+}
+
+// ============================================================================
+// Drivable head (LoadActorHead)
+// ============================================================================
+
+namespace {
+
+template <size_t N>
+void CopyText(char (&dst)[N], std::string_view src) {
+    const size_t n = std::min(src.size(), N - 1);
+    std::memcpy(dst, src.data(), n);
+    dst[n] = '\0';
+}
+
+template <size_t N>
+void CopyText(char (&dst)[N], const char* src) {
+    CopyText(dst, std::string_view(src ? src : ""));
+}
+
+void ToApiTransform(const BoneTransform& in, SkyrimRenderer_Transform& out) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out.rotation[r * 3 + c] = in.rotation.m[r][c];
+    out.translation[0] = in.translation[0];
+    out.translation[1] = in.translation[1];
+    out.translation[2] = in.translation[2];
+    out.scale = in.scale;
+}
+
+void CollectHeadParts(RE::BGSHeadPart* part, std::unordered_map<std::string, RE::BGSHeadPart*>& byEditorID) {
+    if (!part) return;
+    const char* edid = part->GetFormEditorID();
+    if (edid && edid[0] != '\0') byEditorID.emplace(edid, part);
+    for (auto* extra : part->extraParts) CollectHeadParts(extra, byEditorID);
+}
+
+}  // namespace
+
+void ActorPreview::BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh) {
+    drivenShapes_.clear();
+
+    // FaceGen NIFs name each baked shape after its head part's editor ID.
+    std::unordered_map<std::string, RE::BGSHeadPart*> byEditorID;
+    auto* npc = headSource_.visualNPC ? headSource_.visualNPC : baseNPC_;
+    if (npc) {
+        if (npc->headParts) {
+            for (int8_t i = 0; i < npc->numHeadParts; ++i) CollectHeadParts(npc->headParts[i], byEditorID);
+        }
+        if (auto* race = npc->GetRace()) {
+            auto* faceData = race->faceRelatedData[npc->IsFemale() ? RE::SEXES::kFemale : RE::SEXES::kMale];
+            if (faceData && faceData->headParts) {
+                for (auto* hp : *faceData->headParts) CollectHeadParts(hp, byEditorID);
+            }
+        }
+    }
+    for (const auto& [name, part] : partsByMesh) CollectHeadParts(part, byEditorID);
+
+    const auto& meshes = scene_.GetLoadedMeshes();
+    for (uint32_t i = 0; i < meshes.size(); ++i) {
+        const auto& mesh = meshes[i];
+        if (!mesh.isGPUSkinned || mesh.vertexCount == 0 || mesh.bindPoseVertices.size() != mesh.vertexCount) {
+            SKSE::log::info("[SkyrimRenderer] Head shape '{}' is not drivable (unskinned or no bind pose)", mesh.name);
+            continue;
+        }
+        DrivenShape ds;
+        ds.meshIndex = i;
+        if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) ds.part = it->second;
+        else if (auto it2 = byEditorID.find(mesh.name); it2 != byEditorID.end()) ds.part = it2->second;
+
+        const size_t n = mesh.vertexCount;
+        ds.rest.resize(n * 3);
+        ds.restNormals.resize(n * 3);
+        ds.restTangents.resize(n * 4);
+        for (size_t v = 0; v < n; ++v) {
+            const auto& bp = mesh.bindPoseVertices[v];
+            std::memcpy(&ds.rest[v * 3], bp.position, 3 * sizeof(float));
+            std::memcpy(&ds.restNormals[v * 3], bp.normal, 3 * sizeof(float));
+            std::memcpy(&ds.restTangents[v * 4], bp.tangent, 4 * sizeof(float));
+        }
+        ds.uploaded = ds.rest;
+        if (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) ds.positions.assign(n * 3, 0.0f);
+        else ds.positions = ds.rest;
+
+        SKSE::log::info("[SkyrimRenderer] Head shape {} '{}': {} verts, head part {} (type {})",
+                        drivenShapes_.size(), mesh.name, n,
+                        ds.part && ds.part->GetFormEditorID() ? ds.part->GetFormEditorID() : "(none)",
+                        ds.part ? static_cast<int>(ds.part->type.get()) : -1);
+        drivenShapes_.push_back(std::move(ds));
+    }
+}
+
+uint32_t ActorPreview::GetHeadShapeCount() const {
+    std::lock_guard lock(mutex_);
+    return static_cast<uint32_t>(drivenShapes_.size());
+}
+
+bool ActorPreview::GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo& out) {
+    std::lock_guard lock(mutex_);
+    if (index >= drivenShapes_.size() || out.structSize < sizeof(SkyrimRenderer_HeadShapeInfo)) return false;
+    auto& ds = drivenShapes_[index];
+    const auto& meshes = scene_.GetLoadedMeshes();
+    if (ds.meshIndex >= meshes.size()) return false;
+    const auto& mesh = meshes[ds.meshIndex];
+
+    const uint32_t structSize = out.structSize;
+    std::memset(&out, 0, sizeof(SkyrimRenderer_HeadShapeInfo));
+    out.structSize = structSize;
+
+    CopyText(out.shapeName, mesh.name);
+    out.headPartType = SKYRIMRENDERER_HEADPART_UNKNOWN;
+    if (auto* part = ds.part) {
+        out.headPartType = static_cast<int32_t>(part->type.get());
+        out.headPartFormID = part->GetFormID();
+        out.headPartLocalFormID = part->GetLocalFormID();
+        if (auto* file = part->GetFile(0)) CopyText(out.headPartPlugin, file->GetFilename());
+        CopyText(out.headPartEditorID, part->GetFormEditorID());
+        using Morph = RE::BGSHeadPart::MorphIndices;
+        CopyText(out.triMorph, part->morphs[Morph::kDefaultMorph].GetModel());
+        CopyText(out.triRaceMorph, part->morphs[Morph::kRaceMorph].GetModel());
+        CopyText(out.triChargenMorph, part->morphs[Morph::kChargenMorph].GetModel());
+    }
+    out.vertexCount = mesh.vertexCount;
+    ToApiTransform(mesh.shapeLocal, out.shapeLocal);
+    ToApiTransform(BoneTransform::Identity(), out.headSkinToBone);
+    const auto& skin = mesh.skinData;
+    for (size_t b = 0; b < skin.boneNames.size() && b < skin.skinToBone.size(); ++b) {
+        if (skin.boneNames[b] == "NPC Head [Head]") {
+            ToApiTransform(skin.skinToBone[b], out.headSkinToBone);
+            out.hasHeadSkinToBone = 1;
+            break;
+        }
+    }
+    out.positions = ds.positions.data();
+    out.restPositions = ds.rest.data();
+    return true;
+}
+
+bool ActorPreview::GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const {
+    std::lock_guard lock(mutex_);
+    if (!headOnly_ || out.structSize < sizeof(SkyrimRenderer_HeadSourceInfo)) return false;
+    const uint32_t structSize = out.structSize;
+    std::memset(&out, 0, sizeof(SkyrimRenderer_HeadSourceInfo));
+    out.structSize = structSize;
+    out.source = headSource_.source;
+    CopyText(out.faceGenPath, headSource_.faceGenPath);
+    if (auto* npc = headSource_.visualNPC) {
+        out.visualNPCFormID = npc->GetFormID();
+        out.visualNPCLocalFormID = npc->GetLocalFormID();
+        if (auto* file = npc->GetFile(0)) CopyText(out.visualNPCPlugin, file->GetFilename());
+    }
+    out.skyPatcherDonor = headSource_.skyPatcherDonor ? 1 : 0;
+    return true;
+}
+
+void ActorPreview::SetHeadDriveFlags(uint32_t flags) {
+    std::lock_guard lock(mutex_);
+    if ((flags ^ headDriveFlags_) & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) {
+        const bool offsets = (flags & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
+        for (auto& ds : drivenShapes_) {
+            if (offsets) std::fill(ds.positions.begin(), ds.positions.end(), 0.0f);
+            else ds.positions = ds.rest;
+        }
+    }
+    headDriveFlags_ = flags;
+    headDriveDirty_ = true;
+}
+
+void ActorPreview::FlushDrivenHead() {
+    std::lock_guard lock(mutex_);
+    if (drivenShapes_.empty()) return;
+    auto& meshes = scene_.GetLoadedMeshesMut();
+    const bool offsets = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
+    const bool recompute = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_RECOMPUTE_NORMALS) != 0;
+
+    for (auto& ds : drivenShapes_) {
+        if (ds.meshIndex >= meshes.size()) continue;
+        auto& mesh = meshes[ds.meshIndex];
+        const size_t count = ds.rest.size();
+        if (mesh.bindPoseVertices.size() * 3 != count || ds.positions.size() != count) continue;
+
+        bool changed = headDriveDirty_;
+        if (!changed) {
+            if (offsets) {
+                for (size_t k = 0; k < count; ++k) {
+                    if (ds.rest[k] + ds.positions[k] != ds.uploaded[k]) { changed = true; break; }
+                }
+            } else {
+                changed = std::memcmp(ds.positions.data(), ds.uploaded.data(), count * sizeof(float)) != 0;
+            }
+        }
+        if (!changed) continue;
+
+        for (size_t k = 0; k < count; ++k) {
+            ds.uploaded[k] = offsets ? ds.rest[k] + ds.positions[k] : ds.positions[k];
+        }
+        const size_t n = mesh.bindPoseVertices.size();
+        for (size_t v = 0; v < n; ++v) {
+            auto& bp = mesh.bindPoseVertices[v];
+            std::memcpy(bp.position, &ds.uploaded[v * 3], 3 * sizeof(float));
+            // Start from the NIF's frame every time: the recompute votes its
+            // winding against these normals, and OFF must mean untouched.
+            std::memcpy(bp.normal, &ds.restNormals[v * 3], 3 * sizeof(float));
+            std::memcpy(bp.tangent, &ds.restTangents[v * 4], 4 * sizeof(float));
+        }
+        if (recompute) RecomputeNormals(mesh);
+        UploadMeshBindPose(ds.meshIndex);
+    }
+    headDriveDirty_ = false;
 }
 
 // ============================================================================
@@ -1459,24 +1964,7 @@ static bool LoadDDSToPixels(const std::string& path,
                             uint32_t& outWidth, uint32_t& outHeight) {
     // Read the DDS file from BSA or loose
     std::string ddsData;
-    {
-        RE::BSResourceNiBinaryStream stream(path.c_str());
-        if (!stream.good()) return false;
-        constexpr uint32_t kChunkSize = 65536;
-        char buf[kChunkSize];
-        while (stream.good()) {
-            uint32_t posBefore = stream.tell();
-            if (stream.read(buf, kChunkSize)) {
-                ddsData.append(buf, kChunkSize);
-            } else {
-                uint32_t posAfter = stream.tell();
-                uint32_t bytesRead = posAfter - posBefore;
-                if (bytesRead > 0 && bytesRead <= kChunkSize)
-                    ddsData.append(buf, bytesRead);
-                break;
-            }
-        }
-    }
+    if (!SkyrimRenderer::ReadWholeGameFile(path.c_str(), ddsData)) return false;
     if (ddsData.size() < 128) return false;
 
     // Parse DDS header
@@ -1750,6 +2238,32 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
     return srv;
 }
 
+// Apply a BGSTextureSet (head part TNAM or NPC FTST) on top of the textures a
+// head-part NIF embeds, the way the engine does when it assembles a face at
+// runtime. Only non-empty slots override. The TX0x -> shader slot mapping is
+// taken from the vanilla records: SkinHead* sets carry the _sk map in TX03 and
+// the FaceGen detail map in TX04, Eyes* sets carry the env mask in TX02 and the
+// cubemap in TX05 (CommonLib's enum names for 2..5 are the record labels, not
+// the NIF slot meanings).
+static void ApplyTextureSetToMesh(LoadedMesh& mesh, RE::BGSTextureSet* set, ID3D11Device* device) {
+    if (!set || !device) return;
+    auto& texCache = TextureCache::GetInstance();
+    auto load = [&](RE::BSTextureSet::Texture slot, bool srgb) {
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        const char* p = set->textures[slot].textureName.c_str();
+        if (p && p[0] != '\0') srv = texCache.Get(p, device, srgb);
+        return srv;
+    };
+    using Tex = RE::BSTextureSet::Texture;
+    if (auto srv = load(Tex::kDiffuse, true))          mesh.diffuseSRV = srv;   // TX00
+    if (auto srv = load(Tex::kNormal, false))          mesh.normalSRV = srv;    // TX01
+    if (auto srv = load(Tex::kEnvironmentMask, false)) mesh.envMaskSRV = srv;   // TX02 -> NIF slot 5
+    if (auto srv = load(Tex::kGlowMap, false))         mesh.skSRV = srv;        // TX03 -> NIF slot 2 (_sk)
+    if (auto srv = load(Tex::kHeight, false))          mesh.detailSRV = srv;    // TX04 -> NIF slot 3 (detail)
+    if (auto srv = load(Tex::kEnvironment, true))      mesh.cubemapSRV = srv;   // TX05 -> NIF slot 4 (cubemap)
+    if (auto srv = load(Tex::kBacklightMask, false))   mesh.specularSRV = srv;  // TX07 -> NIF slot 7 (_s)
+}
+
 // ============================================================================
 // RebuildMeshes — clear and reload body + armor from a list of FormIDs
 // ============================================================================
@@ -1859,19 +2373,20 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     // Both layers are needed because vanilla NIFs may lack partition data.
     // Slot gating uses addonCoveredSlots (ARMA visual coverage), while partition
     // filtering uses coveredSlotMask (ARMO equip slots) for triangle removal.
-    if (!(addonCoveredSlots & (1u << 2))) {  // slot 32 = Body
+    // Head-only previews (LoadActorHead) skip the body entirely.
+    if (!headOnly_ && !(addonCoveredSlots & (1u << 2))) {  // slot 32 = Body
         batchRequests.push_back({
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Body_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
         });
     }
-    if (!(addonCoveredSlots & (1u << 3))) {  // slot 33 = Hands
+    if (!headOnly_ && !(addonCoveredSlots & (1u << 3))) {  // slot 33 = Hands
         batchRequests.push_back({
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Hands_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
         });
     }
-    if (!(addonCoveredSlots & (1u << 7))) {  // slot 37 = Feet
+    if (!headOnly_ && !(addonCoveredSlots & (1u << 7))) {  // slot 37 = Feet
         batchRequests.push_back({
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Feet_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
@@ -1893,17 +2408,18 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     std::string faceGenPath;
     size_t faceGenBatchIndex = SIZE_MAX;
     bool playerFaceMorphsCollected = false;
+    // Head part -> batch request index, in push order. Drives the HairTint
+    // override, the player's texture-set application and live-face binding.
+    std::vector<std::pair<RE::BGSHeadPart*, size_t>> headPartBatch;
+    RE::BGSHeadPart* playerFacePart = nullptr;
+    auto* faceData = race->faceRelatedData[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
     if (!headCovered) {
         if (baseNPC_->IsPlayer()) {
-            // Player: always load head from disk (race head + head parts), then patch
-            // positions with morphed data from the live scene graph.
+            // Player: load the head from disk (the face head part's own NIF plus
+            // the other head parts), then patch positions with morphed data from
+            // the live scene graph.
             playerFaceMorphsCollected = ExtractPlayerFaceFromLive(skelPath, isFemale);
 
-            faceGenPath = std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Head.nif";
-            faceGenBatchIndex = batchRequests.size();
-            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, coveredSlotMask});
-
-            // Also load the player's head parts (hair, brows, eyes, beard, scars)
             auto* npc = visualNPC;
             std::vector<RE::BGSHeadPart*> headPartsList;
             if (npc->headParts && npc->numHeadParts > 0) {
@@ -1911,14 +2427,38 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                     if (npc->headParts[i]) headPartsList.push_back(npc->headParts[i]);
                 }
             }
-            if (headPartsList.empty()) {
-                auto* faceData = race->faceRelatedData[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
-                if (faceData && faceData->headParts) {
-                    for (auto* hp : *faceData->headParts) {
-                        if (hp) headPartsList.push_back(hp);
-                    }
+            if (headPartsList.empty() && faceData && faceData->headParts) {
+                for (auto* hp : *faceData->headParts) {
+                    if (hp) headPartsList.push_back(hp);
                 }
             }
+
+            // The live face geometry is built from the face head part's model
+            // (High Poly Head etc. replace it), so load that NIF rather than the
+            // Character Assets default; otherwise the vertex counts never match
+            // and the head is left un-patched.
+            for (auto* hp : headPartsList) {
+                if (hp->type.get() == RE::BGSHeadPart::HeadPartType::kFace) { playerFacePart = hp; break; }
+            }
+            if (!playerFacePart && faceData && faceData->headParts) {
+                for (auto* hp : *faceData->headParts) {
+                    if (hp && hp->type.get() == RE::BGSHeadPart::HeadPartType::kFace) { playerFacePart = hp; break; }
+                }
+            }
+            if (playerFacePart && playerFacePart->model.c_str() && playerFacePart->model.c_str()[0] != '\0') {
+                faceGenPath = ensureMeshPrefix(playerFacePart->model.c_str());
+            } else {
+                faceGenPath = std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Head.nif";
+            }
+            SKSE::log::info("[SkyrimRenderer] Player race='{}' face part='{}' model='{}'",
+                            race->GetFormEditorID() ? race->GetFormEditorID() : "",
+                            playerFacePart && playerFacePart->GetFormEditorID() ? playerFacePart->GetFormEditorID() : "(none)",
+                            faceGenPath);
+            faceGenBatchIndex = batchRequests.size();
+            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, coveredSlotMask});
+            if (playerFacePart) headPartBatch.emplace_back(playerFacePart, faceGenBatchIndex);
+            headSource_ = {2 /* SKYRIMRENDERER_HEAD_SOURCE_PLAYER */, faceGenPath, visualNPC, false};
+
             for (auto* headPart : headPartsList) {
                 const char* hpModel = headPart->model.c_str();
                 if (!hpModel || hpModel[0] == '\0') continue;
@@ -1927,25 +2467,34 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                 // Tag hair parts so EquipItem can hide them when a wig covers slot 31
                 auto hpTag = (headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair)
                     ? MeshTag::Hair : MeshTag::Body;
+                headPartBatch.emplace_back(headPart, batchRequests.size());
                 batchRequests.push_back({
                     ensureMeshPrefix(hpModel),
                     hpTag, skelPath, -1.0f, useGPUSkinning_
                 });
             }
         } else {
-            // NPC: load pre-baked FaceGen NIF from disk
+            // NPC: load pre-baked FaceGen NIF from disk. The FaceGen belongs to
+            // the root face NPC, as in the engine: leveled / templated actors
+            // have a runtime base form (no plugin file) whose face comes from
+            // the template NPC.
             auto* npc = visualNPC;
-            auto* npcFile = npc->GetFile(0);
+            auto* faceNPC = npc->GetRootFaceNPC();
+            if (!faceNPC) faceNPC = npc;
+            auto* npcFile = faceNPC->GetFile(0);
             if (npcFile) {
                 char buf[256];
                 snprintf(buf, sizeof(buf),
                          "meshes\\actors\\character\\FaceGenData\\FaceGeom\\%s\\%08X.nif",
-                         npcFile->fileName, npc->GetLocalFormID());
+                         npcFile->fileName, faceNPC->GetLocalFormID());
                 faceGenPath = buf;
             }
+            headSource_ = {0 /* SKYRIMRENDERER_HEAD_SOURCE_FACEGEN */, {}, faceNPC, visualNPC != baseNPC_};
             if (faceGenPath.empty()) {
                 faceGenPath = std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Head.nif";
+                headSource_.source = 1;  // SKYRIMRENDERER_HEAD_SOURCE_RACE_DEFAULT
             }
+            headSource_.faceGenPath = faceGenPath;
             faceGenBatchIndex = batchRequests.size();
             batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, coveredSlotMask});
 
@@ -1957,12 +2506,9 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                     if (npc->headParts[i]) headPartsList.push_back(npc->headParts[i]);
                 }
             }
-            if (headPartsList.empty()) {
-                auto* faceData = race->faceRelatedData[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
-                if (faceData && faceData->headParts) {
-                    for (auto* hp : *faceData->headParts) {
-                        if (hp) headPartsList.push_back(hp);
-                    }
+            if (headPartsList.empty() && faceData && faceData->headParts) {
+                for (auto* hp : *faceData->headParts) {
+                    if (hp) headPartsList.push_back(hp);
                 }
             }
             for (auto* headPart : headPartsList) {
@@ -1974,6 +2520,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                 // Tag hair parts so EquipItem can hide them when a wig covers slot 31
                 auto hpTag = (headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair)
                     ? MeshTag::Hair : MeshTag::Body;
+                headPartBatch.emplace_back(headPart, batchRequests.size());
                 batchRequests.push_back({
                     ensureMeshPrefix(hpModel),
                     hpTag, skelPath, -1.0f, useGPUSkinning_
@@ -1995,127 +2542,91 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         loadedMeshNifPaths_.push_back(req.path);
     }
 
-    // ── Post-load: Apply player face morph positions ────────────────────
-    // Patch disk-loaded head mesh positions with morphed positions from live scene graph.
-    if (playerFaceMorphsCollected && !playerFaceMorphPositions_.empty()) {
-        auto& allMeshes = scene_.GetLoadedMeshesMut();
-        auto* device = scene_.GetDevice();
-        uint32_t patchedCount = 0;
-        for (auto& mesh : allMeshes) {
-            // Try name match first, then vertex count match
-            // Live scene graph names differ from disk NIF names (e.g. MaleHeadNord vs MaleHeadIMF)
-            auto it = playerFaceMorphPositions_.find(mesh.name);
-            if (it == playerFaceMorphPositions_.end()) {
-                // Fallback: match by vertex count (unique within face parts)
-                for (auto& [morphName, morphPos] : playerFaceMorphPositions_) {
-                    if (morphPos.size() == mesh.vertexCount) {
-                        it = playerFaceMorphPositions_.find(morphName);
-                        SKSE::log::info("[SkyrimRenderer] Matched morph '{}' to mesh '{}' by vertex count ({})",
-                                        morphName, mesh.name, mesh.vertexCount);
-                        break;
-                    }
-                }
-            }
-            if (it == playerFaceMorphPositions_.end()) continue;
-
-            auto& morphPositions = it->second;
-
-            // Patch bind-pose vertices with morphed positions
-            for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
-                mesh.bindPoseVertices[v].position[0] = morphPositions[v][0];
-                mesh.bindPoseVertices[v].position[1] = morphPositions[v][1];
-                mesh.bindPoseVertices[v].position[2] = morphPositions[v][2];
-            }
-
-            // Rebuild the GPU vertex buffer with patched positions
-            std::vector<SkinnedVertex> patchedVerts(mesh.vertexCount);
-            for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
-                auto& bp = mesh.bindPoseVertices[v];
-                auto& sv = patchedVerts[v];
-                sv.position[0] = bp.position[0];
-                sv.position[1] = bp.position[1];
-                sv.position[2] = bp.position[2];
-                sv.normal[0] = bp.normal[0];
-                sv.normal[1] = bp.normal[1];
-                sv.normal[2] = bp.normal[2];
-                sv.uv[0] = bp.uv[0];
-                sv.uv[1] = bp.uv[1];
-                sv.color[0] = bp.color[0];
-                sv.color[1] = bp.color[1];
-                sv.color[2] = bp.color[2];
-                sv.color[3] = bp.color[3];
-                sv.tangent[0] = bp.tangent[0];
-                sv.tangent[1] = bp.tangent[1];
-                sv.tangent[2] = bp.tangent[2];
-                sv.tangent[3] = bp.tangent[3];
-                // Skinning data from original vertex (bindPoseVertices doesn't store it)
-                // We need to keep the original skinning — it's already in the GPU buffer.
-                // For GPU-skinned meshes, we can use D3D11_USAGE_DEFAULT + UpdateSubresource.
-            }
-
-            // For GPU-skinned meshes, the vertex buffer needs to be rebuilt.
-            // Create a new DYNAMIC buffer so we can update positions while keeping skinning data.
-            if (device && mesh.isGPUSkinned) {
-                // Map the existing VB to read skinning data, then patch positions
-                // Actually, we need to rebuild from bindPoseVertices which has all data
-                // except skinning. Skinning is baked into the VB at load time.
-                // Simplest approach: read-back the VB, patch positions, re-upload.
-
-                // Alternative: just create a new immutable buffer with patched data.
-                // We need the full SkinnedVertex with skinning — get it from original.
-                // The original VB was created by NifMeshLoader which stores bindPoseVertices
-                // but skinning weights are in mesh.skinData.vertexWeights.
-
-                // Build complete SkinnedVertex array from bindPoseVertices + skinData
-                for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
-                    auto& sv = patchedVerts[v];
-                    if (v < mesh.skinData.vertexWeights.size()) {
-                        auto& sw = mesh.skinData.vertexWeights[v];
-                        sv.boneIndices[0] = sw.boneIndices[0];
-                        sv.boneIndices[1] = sw.boneIndices[1];
-                        sv.boneIndices[2] = sw.boneIndices[2];
-                        sv.boneIndices[3] = sw.boneIndices[3];
-                        sv.boneWeights[0] = sw.weights[0];
-                        sv.boneWeights[1] = sw.weights[1];
-                        sv.boneWeights[2] = sw.weights[2];
-                        sv.boneWeights[3] = sw.weights[3];
-                    } else {
-                        sv.boneIndices[0] = 0; sv.boneIndices[1] = 0;
-                        sv.boneIndices[2] = 0; sv.boneIndices[3] = 0;
-                        sv.boneWeights[0] = 1.0f; sv.boneWeights[1] = 0.0f;
-                        sv.boneWeights[2] = 0.0f; sv.boneWeights[3] = 0.0f;
-                    }
-                }
-
-                D3D11_BUFFER_DESC vbDesc = {};
-                vbDesc.ByteWidth = static_cast<UINT>(patchedVerts.size() * sizeof(SkinnedVertex));
-                vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
-                vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-                D3D11_SUBRESOURCE_DATA vbData = {};
-                vbData.pSysMem = patchedVerts.data();
-
-                Microsoft::WRL::ComPtr<ID3D11Buffer> newVB;
-                HRESULT hr = device->CreateBuffer(&vbDesc, &vbData, newVB.ReleaseAndGetAddressOf());
-                if (SUCCEEDED(hr)) {
-                    mesh.vertexBuffer = std::move(newVB);
-                    // Update bounding box
-                    mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = FLT_MAX;
-                    mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] = -FLT_MAX;
-                    for (const auto& pos : morphPositions) {
-                        mesh.boundsMin[0] = std::min(mesh.boundsMin[0], pos[0]);
-                        mesh.boundsMin[1] = std::min(mesh.boundsMin[1], pos[1]);
-                        mesh.boundsMin[2] = std::min(mesh.boundsMin[2], pos[2]);
-                        mesh.boundsMax[0] = std::max(mesh.boundsMax[0], pos[0]);
-                        mesh.boundsMax[1] = std::max(mesh.boundsMax[1], pos[1]);
-                        mesh.boundsMax[2] = std::max(mesh.boundsMax[2], pos[2]);
-                    }
-                    patchedCount++;
-                    SKSE::log::info("[SkyrimRenderer] Patched '{}' with {} morphed positions",
-                                    mesh.name, morphPositions.size());
-                }
+    // Head part behind each loaded head mesh, by mesh name (indices shift when
+    // baked FaceGen parts drop the separate head-part meshes below).
+    std::unordered_map<std::string, RE::BGSHeadPart*> partsByMesh;
+    if (headOnly_) {
+        const auto& loaded = scene_.GetLoadedMeshes();
+        for (const auto& [part, batchIdx] : headPartBatch) {
+            const auto& req = batchRequests[batchIdx];
+            for (uint32_t j = 0; j < req.meshCount; ++j) {
+                const uint32_t idx = req.meshStartIndex + j;
+                if (idx < loaded.size()) partsByMesh.emplace(loaded[idx].name, part);
             }
         }
-        SKSE::log::info("[SkyrimRenderer] Applied face morph positions to {} meshes", patchedCount);
+    }
+
+    // ── Post-load: Apply player face morph positions ────────────────────
+    // Patch disk-loaded head mesh positions with morphed positions from live scene graph.
+    liveFaceBindings_.clear();
+    if (playerFaceMorphsCollected && !playerFaceMorphPositions_.empty()) {
+        auto& allMeshes = scene_.GetLoadedMeshesMut();
+
+        // Only head meshes (face NIF + head parts) are candidates.
+        std::vector<uint32_t> headMeshIndices;
+        for (const auto& [part, batchIdx] : headPartBatch) {
+            const auto& req = batchRequests[batchIdx];
+            for (uint32_t j = 0; j < req.meshCount; ++j) headMeshIndices.push_back(req.meshStartIndex + j);
+        }
+        if (faceGenBatchIndex != SIZE_MAX && !playerFacePart) {
+            const auto& req = batchRequests[faceGenBatchIndex];
+            for (uint32_t j = 0; j < req.meshCount; ++j) headMeshIndices.push_back(req.meshStartIndex + j);
+        }
+
+        // Each live shape binds to at most one mesh and vice versa.
+        std::unordered_set<std::string> boundLive;
+        auto tryBind = [&](LoadedMesh& mesh, const std::string& liveName, const char* how) {
+            if (liveFaceBindings_.contains(mesh.name) || boundLive.contains(liveName)) return false;
+            auto it = playerFaceMorphPositions_.find(liveName);
+            if (it == playerFaceMorphPositions_.end() || it->second.size() != mesh.vertexCount) return false;
+            liveFaceBindings_[mesh.name] = liveName;
+            boundLive.insert(liveName);
+            SKSE::log::info("[SkyrimRenderer] Bound live shape '{}' to mesh '{}' ({} verts, by {})",
+                            liveName, mesh.name, mesh.vertexCount, how);
+            return true;
+        };
+
+        // Pass 1: the engine names face-node geometry after the head part's editor
+        // ID, and FaceGen exports keep those names; try that and the disk shape name.
+        for (const auto& [part, batchIdx] : headPartBatch) {
+            const auto& req = batchRequests[batchIdx];
+            if (req.meshCount != 1 || req.meshStartIndex >= allMeshes.size()) continue;
+            const char* edid = part->GetFormEditorID();
+            if (edid && edid[0] != '\0') tryBind(allMeshes[req.meshStartIndex], edid, "head part ID");
+        }
+        for (uint32_t idx : headMeshIndices) {
+            if (idx < allMeshes.size()) tryBind(allMeshes[idx], allMeshes[idx].name, "shape name");
+        }
+
+        // Pass 2: vertex count, only when exactly one unbound live shape has it.
+        for (uint32_t idx : headMeshIndices) {
+            if (idx >= allMeshes.size()) continue;
+            auto& mesh = allMeshes[idx];
+            if (liveFaceBindings_.contains(mesh.name)) continue;
+            const std::string* candidate = nullptr;
+            uint32_t candidates = 0;
+            for (const auto& [liveName, pos] : playerFaceMorphPositions_) {
+                if (boundLive.contains(liveName) || pos.size() != mesh.vertexCount) continue;
+                candidate = &liveName;
+                candidates++;
+            }
+            if (candidates == 1) {
+                tryBind(mesh, *candidate, "unique vertex count");
+            } else if (candidates > 1) {
+                SKSE::log::warn("[SkyrimRenderer] Mesh '{}' ({} verts) matches {} live shapes by vertex count; left unbound",
+                                mesh.name, mesh.vertexCount, candidates);
+            }
+        }
+        for (const auto& [liveName, pos] : playerFaceMorphPositions_) {
+            if (!boundLive.contains(liveName)) {
+                SKSE::log::info("[SkyrimRenderer] Live shape '{}' ({} verts) has no matching disk mesh",
+                                liveName, pos.size());
+            }
+        }
+
+        // Patch bind-pose positions and (re)build the GPU buffers; the bindings
+        // stay so RefreshLiveFace can repeat the upload with fresh positions.
+        UploadLiveFacePositions(/*quiet=*/false);
         playerFaceMorphPositions_.clear();  // done with these
     }
 
@@ -2123,14 +2634,18 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     if (faceGenBatchIndex != SIZE_MAX && faceGenBatchIndex < batchRequests.size()) {
         auto& allMeshes = scene_.GetLoadedMeshesMut();
         uint32_t faceGenShapeCount = batchRequests[faceGenBatchIndex].meshCount;
-        bool faceGenHasBakedParts = (faceGenShapeCount > 1);
+        // Only NPC FaceGen NIFs bake head parts in; the player's head NIF is a
+        // plain head-part model, so a multi-shape head must not drop its parts.
+        bool faceGenHasBakedParts = (faceGenShapeCount > 1) && !baseNPC_->IsPlayer();
 
         if (faceGenHasBakedParts) {
             // FaceGen has baked-in head parts — remove separate head parts (they'd be duplicates)
             SKSE::log::info("[SkyrimRenderer] FaceGen has {} baked-in shapes — removing separate head parts", faceGenShapeCount);
+            // Every request after the FaceGen one is a head part; hair parts are
+            // tagged Hair (for wig hiding) but are baked into FaceGen just the same.
             for (size_t i = faceGenBatchIndex + 1; i < batchRequests.size(); ++i) {
                 auto& req = batchRequests[i];
-                if (req.tag == MeshTag::Body && req.meshCount > 0) {
+                if ((req.tag == MeshTag::Body || req.tag == MeshTag::Hair) && req.meshCount > 0) {
                     // Remove meshes from this head part request
                     for (uint32_t j = 0; j < req.meshCount; ++j) {
                         uint32_t idx = req.meshStartIndex + j;
@@ -2144,37 +2659,17 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         } else {
             // Apply HairTint override for eyebrow/hair head parts
             SKSE::log::info("[SkyrimRenderer] FaceGen has {} shapes — keeping separate head parts", faceGenShapeCount);
-            auto* npc = visualNPC;
-            std::vector<RE::BGSHeadPart*> headPartsList;
-            if (npc->headParts && npc->numHeadParts > 0) {
-                for (int8_t i = 0; i < npc->numHeadParts; ++i) {
-                    if (npc->headParts[i]) headPartsList.push_back(npc->headParts[i]);
-                }
-            }
-
-            // Map head part paths to their batch indices
-            size_t hpBatchStart = faceGenBatchIndex + 1;
-            size_t hpIdx = 0;
-            for (auto* headPart : headPartsList) {
-                const char* hpModel = headPart->model.c_str();
-                if (!hpModel || hpModel[0] == '\0') continue;
-                if (headPart->type.get() == RE::BGSHeadPart::HeadPartType::kFace) continue;
-
-                size_t batchIdx = hpBatchStart + hpIdx;
-                hpIdx++;
-                if (batchIdx >= batchRequests.size()) break;
-
+            for (const auto& [headPart, batchIdx] : headPartBatch) {
                 auto hpType = headPart->type.get();
-                if (hpType == RE::BGSHeadPart::HeadPartType::kEyebrows ||
-                    hpType == RE::BGSHeadPart::HeadPartType::kHair) {
-                    auto& req = batchRequests[batchIdx];
-                    for (uint32_t j = 0; j < req.meshCount; ++j) {
-                        uint32_t idx = req.meshStartIndex + j;
-                        if (idx < allMeshes.size() && allMeshes[idx].shadingModel == ShadingModel::Default) {
-                            SKSE::log::info("[SkyrimRenderer] Override '{}': Default -> HairTint (head part type={})",
-                                            allMeshes[idx].name, static_cast<uint32_t>(hpType));
-                            allMeshes[idx].shadingModel = ShadingModel::HairTint;
-                        }
+                if (hpType != RE::BGSHeadPart::HeadPartType::kEyebrows &&
+                    hpType != RE::BGSHeadPart::HeadPartType::kHair) continue;
+                auto& req = batchRequests[batchIdx];
+                for (uint32_t j = 0; j < req.meshCount; ++j) {
+                    uint32_t idx = req.meshStartIndex + j;
+                    if (idx < allMeshes.size() && allMeshes[idx].shadingModel == ShadingModel::Default) {
+                        SKSE::log::info("[SkyrimRenderer] Override '{}': Default -> HairTint (head part type={})",
+                                        allMeshes[idx].name, static_cast<uint32_t>(hpType));
+                        allMeshes[idx].shadingModel = ShadingModel::HairTint;
                     }
                 }
             }
@@ -2242,24 +2737,20 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         }
     }
 
-    // Hair color from NPC's hair color form or race default
+    // Hair color from NPC's hair color form or race default.
+    // CLFM bytes are scaled with 128 = 1.0, the same as the engine's
+    // Actor::UpdateHairColor and the hairTintColor the CK bakes into FaceGen
+    // (HairColor10BlueBlack 20,20,24 is baked as 0.156,0.156,0.188).
+    constexpr float kHairColorScale = 1.0f / 128.0f;
     float hairTint[3] = {1.0f, 1.0f, 1.0f};
     bool hasHairTint = false;
     auto* hairColorForm = visualNPC->headRelatedData ? visualNPC->headRelatedData->hairColor : nullptr;
+    if (!hairColorForm && faceData) hairColorForm = faceData->defaultHairColor;
     if (hairColorForm) {
-        hairTint[0] = hairColorForm->color.red / 255.0f;
-        hairTint[1] = hairColorForm->color.green / 255.0f;
-        hairTint[2] = hairColorForm->color.blue / 255.0f;
+        hairTint[0] = hairColorForm->color.red * kHairColorScale;
+        hairTint[1] = hairColorForm->color.green * kHairColorScale;
+        hairTint[2] = hairColorForm->color.blue * kHairColorScale;
         hasHairTint = true;
-    } else {
-        // Fallback to race default hair color
-        auto* faceData = race->faceRelatedData[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
-        if (faceData && faceData->defaultHairColor) {
-            hairTint[0] = faceData->defaultHairColor->color.red / 255.0f;
-            hairTint[1] = faceData->defaultHairColor->color.green / 255.0f;
-            hairTint[2] = faceData->defaultHairColor->color.blue / 255.0f;
-            hasHairTint = true;
-        }
     }
 
     // Note: Player hair color comes from headRelatedData->hairColor (same as NPCs).
@@ -2318,45 +2809,64 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         }
     }
 
-    // Player: composite tint layers + load face detail texture from FTST record
+    // Player: the head-part NIFs on disk embed placeholder textures (EyesMale.nif
+    // carries one eye colour, MaleHead.nif the human MSN). The engine replaces
+    // them with the NPC's FTST (complexion set, race-specific MSN, detail map)
+    // on the face and each head part's TNAM (eye colour, brow texture) on the
+    // rest; NPC FaceGen NIFs have that baked in. Do the same here, then put the
+    // composite chargen tint on the face.
     if (baseNPC_->IsPlayer()) {
         auto* device = scene_.GetDevice();
-        auto& texCache = TextureCache::GetInstance();
 
-        auto compositeTint = CompositePlayerTintLayers(device);
-
-        // Load face detail texture from the player's FTST (headRelatedData->faceDetails)
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> faceDetailSRV;
+        RE::BGSTextureSet* faceSet = nullptr;
+        const char* faceSetSource = "none";
         if (visualNPC->headRelatedData && visualNPC->headRelatedData->faceDetails) {
-            auto* ftst = visualNPC->headRelatedData->faceDetails;
-            // Log all texture slots in the FTST for diagnostics
+            faceSet = visualNPC->headRelatedData->faceDetails;
+            faceSetSource = "FTST";
+        } else if (playerFacePart && playerFacePart->textureSet) {
+            faceSet = playerFacePart->textureSet;
+            faceSetSource = "face part TNAM";
+        } else if (faceData && faceData->defaultFaceDetailsTextureSet) {
+            faceSet = faceData->defaultFaceDetailsTextureSet;
+            faceSetSource = "race default";
+        }
+        if (faceSet) {
+            SKSE::log::info("[SkyrimRenderer] Player face texture set '{}' ({})",
+                            faceSet->GetFormEditorID() ? faceSet->GetFormEditorID() : "", faceSetSource);
             for (uint32_t slot = 0; slot < RE::BSTextureSet::Textures::kUsedTotal; ++slot) {
-                const char* texPath = ftst->textures[slot].textureName.c_str();
+                const char* texPath = faceSet->textures[slot].textureName.c_str();
                 if (texPath && texPath[0] != '\0') {
-                    SKSE::log::info("[SkyrimRenderer] Player FTST slot {}: {}", slot, texPath);
-                }
-            }
-            // Slot 4 (kHeight) = FaceGen detail texture in the FTST record
-            const char* detailPath = ftst->textures[RE::BSTextureSet::Texture::kHeight].textureName.c_str();
-            if (detailPath && detailPath[0] != '\0') {
-                std::string fullPath = std::string("textures\\") + detailPath;
-                faceDetailSRV = texCache.Get(fullPath, device, false);  // linear (shader manages gamma)
-                if (faceDetailSRV) {
-                    SKSE::log::info("[SkyrimRenderer] Loaded player face detail from FTST: {}", fullPath);
+                    SKSE::log::info("[SkyrimRenderer]   TX0{}: {}", slot, texPath);
                 }
             }
         }
 
+        if (faceGenBatchIndex != SIZE_MAX && faceSet) {
+            const auto& req = batchRequests[faceGenBatchIndex];
+            for (uint32_t j = 0; j < req.meshCount; ++j) {
+                uint32_t idx = req.meshStartIndex + j;
+                if (idx < meshes.size()) ApplyTextureSetToMesh(meshes[idx], faceSet, device);
+            }
+        }
+        for (const auto& [headPart, batchIdx] : headPartBatch) {
+            if (headPart == playerFacePart || !headPart->textureSet) continue;
+            const auto& req = batchRequests[batchIdx];
+            for (uint32_t j = 0; j < req.meshCount; ++j) {
+                uint32_t idx = req.meshStartIndex + j;
+                if (idx < meshes.size()) {
+                    ApplyTextureSetToMesh(meshes[idx], headPart->textureSet, device);
+                    SKSE::log::info("[SkyrimRenderer] Applied head part '{}' texture set to '{}'",
+                                    headPart->GetFormEditorID() ? headPart->GetFormEditorID() : "",
+                                    meshes[idx].name);
+                }
+            }
+        }
+
+        auto compositeTint = CompositePlayerTintLayers(device);
         for (auto& mesh : meshes) {
-            if (mesh.shadingModel == ShadingModel::FaceGen) {
-                if (!mesh.tintSRV && compositeTint) {
-                    mesh.tintSRV = compositeTint;
-                    SKSE::log::info("[SkyrimRenderer] Applied composite tint texture to '{}'", mesh.name);
-                }
-                if (!mesh.detailSRV && faceDetailSRV) {
-                    mesh.detailSRV = faceDetailSRV;
-                    SKSE::log::info("[SkyrimRenderer] Applied FTST detail texture to '{}'", mesh.name);
-                }
+            if (mesh.shadingModel == ShadingModel::FaceGen && !mesh.tintSRV && compositeTint) {
+                mesh.tintSRV = compositeTint;
+                SKSE::log::info("[SkyrimRenderer] Applied composite tint texture to '{}'", mesh.name);
             }
         }
     }
@@ -2416,6 +2926,8 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         auto pose = animController_->EvaluatePose();
         ApplyPoseGPUSkinning(pose);
     }
+
+    if (headOnly_) BuildDrivenHead(partsByMesh);
 
     auto rebuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - rebuildStart).count();

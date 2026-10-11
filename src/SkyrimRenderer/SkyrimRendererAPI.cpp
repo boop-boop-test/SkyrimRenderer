@@ -7,6 +7,9 @@
 #include "SkyrimRenderer/MorphTypes.h"
 
 #include <RE/Skyrim.h>
+#include <SKSE/SKSE.h>
+
+#include <spdlog/sinks/basic_file_sink.h>
 
 #include <algorithm>
 #include <cstring>
@@ -69,10 +72,71 @@ inline SkyrimRenderer_LightConfig ToCLight(const LightConfig& cpp) {
     return out;
 }
 
+// The DLL is loaded by its consumers, not by SKSE, so nothing sets up its
+// logger and every SKSE::log line was dropped. Give it its own
+// SkyrimRenderer.log next to the other SKSE logs.
+void EnsureLog() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        auto dir = SKSE::log::log_directory();
+        if (!dir) return;
+        try {
+            auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+                (*dir / "SkyrimRenderer.log").string(), true);
+            auto logger = std::make_shared<spdlog::logger>("SkyrimRenderer", std::move(sink));
+            logger->set_level(spdlog::level::info);
+            logger->flush_on(spdlog::level::info);
+            logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%t] [%l] %v");
+            spdlog::set_default_logger(std::move(logger));
+            SKSE::log::info("[SkyrimRenderer] Log started (build {}.{}.{}, API v{})",
+                            SKYRIMRENDERER_BUILD_VERSION_MAJOR, SKYRIMRENDERER_BUILD_VERSION_MINOR,
+                            SKYRIMRENDERER_BUILD_VERSION_PATCH, SKYRIMRENDERER_API_VERSION);
+        } catch (const std::exception&) {
+            // No log file is not a reason to stop rendering.
+        }
+    });
+}
+
+// Shaders ship next to the DLL: <dir>/shaders for a bundled copy
+// (SKSE/Plugins/<Owner>/SkyrimRenderer/SkyrimRenderer.dll) and
+// <dir>/SkyrimRenderer/shaders for the standalone one
+// (SKSE/Plugins/SkyrimRenderer.dll). Defaulting to them keeps the DLL and its
+// shaders from different builds apart; SetShaderDirectory still overrides.
+void EnsureDefaultShaderDirectory() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        HMODULE self = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&EnsureDefaultShaderDirectory), &self)) {
+            return;
+        }
+        wchar_t buf[MAX_PATH]{};
+        if (!GetModuleFileNameW(self, buf, MAX_PATH)) return;
+        const auto dllDir = std::filesystem::path(buf).parent_path();
+        for (const auto& dir : { dllDir / L"shaders", dllDir / L"SkyrimRenderer" / L"shaders" }) {
+            std::error_code ec;
+            if (std::filesystem::exists(dir / L"Preview.ps.hlsl", ec)) {
+                SceneManager::GetInstance().SetShaderDirectory(dir);
+                return;
+            }
+        }
+        SKSE::log::warn("[SkyrimRenderer] No shaders next to {} — consumer must call SetShaderDirectory",
+                        std::filesystem::path(buf).string());
+    });
+}
+
 } // anonymous namespace
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void) {
-    return 1;
+    EnsureLog();
+    EnsureDefaultShaderDirectory();
+    return SKYRIMRENDERER_API_VERSION;
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetBuildVersion(void) {
+    return SKYRIMRENDERER_PACK_VERSION(SKYRIMRENDERER_BUILD_VERSION_MAJOR,
+                                       SKYRIMRENDERER_BUILD_VERSION_MINOR,
+                                       SKYRIMRENDERER_BUILD_VERSION_PATCH);
 }
 
 
@@ -130,9 +194,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_RequestRender(uint32_t scene) {
 }
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderSync(uint32_t scene) {
-    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
-    if (!rs) return FromResult(Result::InvalidHandle);
-    return FromResult(rs->Render());
+    return FromResult(SceneManager::GetInstance().RenderToTexture(ToScene(scene)));
 }
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadbackPixels(
@@ -545,4 +607,77 @@ SKYRIMRENDERER_API void SkyrimRenderer_PreloadBodyMeshes(void) {
 
 SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void) {
     SkyPatcherService::GetInstance().Load();
+}
+
+
+// ============================================================================
+// API v2
+// ============================================================================
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetSceneTextureMode(uint32_t scene, int32_t enabled) {
+    SceneManager::GetInstance().SetSceneTextureMode(ToScene(scene), enabled != 0);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTexture(uint32_t scene) {
+    return FromResult(SceneManager::GetInstance().RenderToTexture(ToScene(scene)));
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneTexture(
+    uint32_t scene, ID3D11ShaderResourceView** out_srv, ID3D11Texture2D** out_texture,
+    uint32_t* out_width, uint32_t* out_height) {
+    SceneManager::SceneTextureInfo info;
+    bool ok = SceneManager::GetInstance().GetSceneTexture(ToScene(scene), info);
+    if (out_srv)     *out_srv = ok ? info.srv : nullptr;
+    if (out_texture) *out_texture = ok ? info.texture : nullptr;
+    if (out_width)   *out_width = ok ? info.width : 0;
+    if (out_height)  *out_height = ok ? info.height : 0;
+    return ok ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_Tick(void) {
+    SceneManager::GetInstance().Tick();
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_IsPresentHookInstalled(void) {
+    return SceneManager::GetInstance().IsPresentHookInstalled() ? 1 : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_IsDeviceLost(uint32_t* out_reason) {
+    auto& mgr = SceneManager::GetInstance();
+    bool lost = mgr.IsDeviceLost();
+    if (out_reason) *out_reason = lost ? mgr.GetDeviceLostReason() : 0;
+    return lost ? 1 : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor) {
+    return SceneManager::GetInstance().RefreshLiveFace(ToActor(actor)) ? 1 : 0;
+}
+
+// --- API v4: drivable head --------------------------------------------------
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorHead(uint32_t scene, uint32_t formID) {
+    return static_cast<uint32_t>(SceneManager::GetInstance().LoadActorHead(
+        ToScene(scene), static_cast<RE::FormID>(formID)));
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeCount(uint32_t actor) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeCount() : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
+    uint32_t actor, uint32_t index, SkyrimRenderer_HeadShapeInfo* out) {
+    if (!out) return 0;
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->GetHeadShapeInfo(index, *out) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRenderer_HeadSourceInfo* out) {
+    if (!out) return 0;
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->GetHeadSource(*out) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags) {
+    if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
 }

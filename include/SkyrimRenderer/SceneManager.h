@@ -5,6 +5,7 @@
 #include "SkyrimRenderer/ActorPreview.h"
 #include "SkyrimRenderer/ScreenQuadRenderer.h"
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -24,22 +25,73 @@ using RenderCompleteCallback = std::function<void(
 ///
 /// Thread-safe singleton. All scene/actor handles are managed here.
 /// This is the primary entry point for consuming code.
+///
+/// Two ways to drive rendering:
+///   - Composite mode (DressCode): InstallPresentHook once; every frame the hook
+///     ticks animations, renders pending scenes and draws composite rects into
+///     the engine's framebuffer before Present.
+///   - Texture mode (UI hosts): no Present hook. The consumer calls Tick() and/or
+///     RenderToTexture() from the game's main thread inside the frame and samples
+///     the scene's SRV itself. Nothing is drawn at Present, so frame generation
+///     and HUD-fix layers cannot drop it.
 class SceneManager {
 public:
     static SceneManager& GetInstance();
 
     // ── Frame Hook ─────────────────────────────────────────────────────────
 
-    /// Install the IDXGISwapChain::Present hook for frame-synchronized rendering.
-    /// Call once after the DX11 device is available. Returns false on failure.
+    /// Install the IDXGISwapChain::Present hook for frame-synchronized rendering
+    /// and backbuffer compositing. Only composite consumers need it. Call once
+    /// after the DX11 device is available. Returns false on failure or when the
+    /// game swapchain's vtable is not trusted.
     bool InstallPresentHook();
 
-    /// Request an async render for a scene. The result will be delivered via
-    /// the registered callback on the next frame's Present hook.
+    bool IsPresentHookInstalled() const { return hookInstalled_; }
+
+    /// Per-frame work: tick animations and process pending async renders.
+    /// The Present hook calls this; a texture-mode consumer without the hook
+    /// calls it once per frame from the game's main thread.
+    void Tick();
+
+    /// Request an async render for a scene. Processed by the next Tick() (the
+    /// Present hook or the consumer's own per-frame call). Scenes with a
+    /// composite rect render for the composite; texture-mode scenes render into
+    /// their texture; any other scene renders and reads back to the callback.
     void RequestRender(SceneHandle scene);
 
     /// Register a callback to receive completed render data.
     void SetRenderCompleteCallback(RenderCompleteCallback callback);
+
+    // ── Texture Mode ───────────────────────────────────────────────────────
+
+    /// Mark a scene as feeding a texture consumer: premultiplied output, no
+    /// readback, never composited.
+    void SetSceneTextureMode(SceneHandle scene, bool enabled);
+
+    /// Render a scene now on the calling thread, which must be the game's main
+    /// thread inside the frame. The immediate context's full pipeline state is
+    /// saved and restored around the render. Returns Result::DeviceLost once the
+    /// device has been removed.
+    Result RenderToTexture(SceneHandle scene);
+
+    struct SceneTextureInfo {
+        ID3D11ShaderResourceView* srv = nullptr;   // UNORM view, one mip, sRGB-encoded
+        ID3D11Texture2D* texture = nullptr;        // engine-device R8G8B8A8_TYPELESS texture
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
+    /// Borrowed pointers; valid until the scene is resized or destroyed.
+    bool GetSceneTexture(SceneHandle scene, SceneTextureInfo& out);
+
+    /// Re-read the player's live face vertices into an actor preview.
+    bool RefreshLiveFace(ActorHandle actor);
+
+    // ── Device Health ──────────────────────────────────────────────────────
+
+    /// True once GetDeviceRemovedReason reported a loss. Rendering is off for
+    /// the rest of the session; the Present hook passes straight through.
+    bool IsDeviceLost() const { return deviceLost_.load(std::memory_order_acquire); }
+    uint32_t GetDeviceLostReason() const { return deviceLostReason_; }
 
     // ── Configuration ──────────────────────────────────────────────────────
 
@@ -185,6 +237,10 @@ public:
     ActorHandle LoadActorPreview(SceneHandle scene, RE::FormID actorFormID,
                                  const std::string& animationPath = "");
 
+    /// Load only an actor's resolved head with drivable vertex arrays
+    /// (API v4). The arrays are uploaded before every render of the scene.
+    ActorHandle LoadActorHead(SceneHandle scene, RE::FormID formID);
+
     /// Get an actor preview by handle.
     ActorPreview* GetActorPreview(ActorHandle handle);
 
@@ -270,12 +326,12 @@ private:
     SceneManager(const SceneManager&) = delete;
     SceneManager& operator=(const SceneManager&) = delete;
 
-    /// Called from the Present hook. Processes all pending render requests.
-    void ProcessPendingRenders(IDXGISwapChain* swapChain);
+    /// Processes all pending render requests. Called from Tick().
+    void ProcessPendingRenders();
 
-    /// Composite ALL scenes with active composite rects to the backbuffer.
-    /// Called every frame from HookedPresent, after the rest of the hook chain.
-    void CompositeAllScenes(IDXGISwapChain* swapChain);
+    /// Composite ALL scenes with active composite rects into the engine's
+    /// framebuffer. Called every frame from HookedPresent.
+    void CompositeAllScenes();
 
     /// Composite a single scene's rendered texture to the backbuffer.
     void CompositeToBackbuffer(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* backbufferRTV,
@@ -285,6 +341,17 @@ private:
     /// Uninstall the Present hook. Called by Shutdown().
     void UninstallPresentHook();
 
+    /// Render with the device-lost guard: refuses after a loss, checks
+    /// GetDeviceRemovedReason afterwards and latches the loss.
+    Result GuardedRender(RenderScene* scene, const char* where);
+
+    /// Poll GetDeviceRemovedReason on the engine device. Returns false (and
+    /// latches deviceLost_) when the device is gone.
+    bool CheckDeviceHealth(const char* where);
+
+    /// Log which known present layers are loaded and who owns the Present slot.
+    static void LogPresentLayers(const void* presentSlot);
+
     // Present hook trampoline
     static HRESULT STDMETHODCALLTYPE HookedPresent(
         IDXGISwapChain* swapChain, UINT syncInterval, UINT flags);
@@ -292,7 +359,11 @@ private:
     using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
     static inline PresentFn originalPresent_ = nullptr;
     static inline void** swapChainVtable_ = nullptr;
+    static inline void* gameSwapChain_ = nullptr;   // the engine's own swapchain object
     static inline bool hookInstalled_ = false;
+
+    std::atomic<bool> deviceLost_{false};
+    uint32_t deviceLostReason_ = 0;
 
     std::mutex mutex_;
     std::filesystem::path shaderDir_;
