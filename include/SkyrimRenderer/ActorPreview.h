@@ -126,9 +126,10 @@ public:
     /// Apply the NIF skeleton's bind pose as the GPU skinning pose.
     /// Uses the same bone globals that ApplySkeletonPose uses, bypassing
     /// the HKX skeleton and animation system entirely. Idempotent: a repeat
-    /// call rebuilds the same pose. Head previews (except the player's live
-    /// face) get it at load and whenever their pose is reset.
-    void ApplyNifBindPose();
+    /// call rebuilds the same pose. Every preview but the player's live face
+    /// in a head preview rests on it: at load without an animation and
+    /// whenever the pose is reset. False when the skeleton NIF can't be read.
+    bool ApplyNifBindPose();
 
     /// Advance animation by one frame's worth of time.
     /// Called from the per-frame tick. Returns true if a re-render is needed.
@@ -190,13 +191,17 @@ private:
     // Head-only: resolved head of an NPC (loaded reference or base form)
     Result LoadHeadOnly(RE::TESNPC* npc);
 
-    // Head previews other than the player's live face are drawn on the race
-    // skeleton NIF's bind pose (the pose their camera bounds were taken in).
-    bool HeadUsesNifBindPose() const;
+    // Previews with no animation pose are drawn on the race skeleton NIF's
+    // bind pose, except the player's live face in a head preview.
+    bool RestsOnNifBindPose() const;
 
-    // Drop the animation pose: back to the NIF bind pose for such heads, no
-    // pose (shapes drawn as stored) for everything else.
+    // Drop the animation pose: back to the NIF bind pose (see above); no pose
+    // (shapes drawn as stored) only for the player's live head preview.
     void ResetGPUSkinningPose();
+
+    // Build nifSkeleton_ / nifBindPoseFallback_ from the skeleton NIF plus the
+    // loaded mesh NIFs' extra bones, once. False when the NIF can't be read.
+    bool EnsureNifSkeleton();
 
     // Build drivenShapes_ from the loaded head meshes (end of RebuildMeshes)
     void BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh);

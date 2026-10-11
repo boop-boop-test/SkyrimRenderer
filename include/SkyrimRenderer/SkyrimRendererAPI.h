@@ -256,6 +256,10 @@ SKYRIMRENDERER_API void     SkyrimRenderer_ClearMeshes(uint32_t scene);
 // --- Actor -----------------------------------------------------------------
 
 // Load an actor into a scene. Pass "" for animationPath to skip animation.
+// Without an animation pose the actor is skinned on its race skeleton NIF's
+// bind pose (build 1.4.1; before, shapes were drawn as stored and vanilla
+// FaceGen heads, stored in head-bone skin space, sat far below the body).
+// SetPose("") and StopAnimation return to that bind pose too.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorPreview(
     uint32_t scene, uint32_t actorFormID, const char* animationPath);
 SKYRIMRENDERER_API void     SkyrimRenderer_DestroyActorPreview(uint32_t actor);
@@ -292,7 +296,8 @@ SKYRIMRENDERER_API void     SkyrimRenderer_SetAnimationLooping(uint32_t actor, i
 SKYRIMRENDERER_API void     SkyrimRenderer_SetSkipBindCorrection(uint32_t actor, int32_t skip);
 SKYRIMRENDERER_API void     SkyrimRenderer_SetUseRefPoseLocals(uint32_t actor, int32_t use);
 // Pose the actor on its race skeleton NIF's bind pose (no animation).
-// Idempotent. Head actors other than the player's get it at load (API v6).
+// Idempotent. Head actors other than the player's get it at load (API v6),
+// full actor previews whenever they have no animation pose (build 1.4.1).
 SKYRIMRENDERER_API void     SkyrimRenderer_ApplyNifBindPose(uint32_t actor);
 
 SKYRIMRENDERER_API void     SkyrimRenderer_GetAnimationState(

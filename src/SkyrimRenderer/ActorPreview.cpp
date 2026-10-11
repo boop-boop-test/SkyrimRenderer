@@ -298,7 +298,7 @@ ActorPreview::ActorPreview(RenderScene& scene, RE::FormID actorFormID, bool head
         SKSE::log::info("[SkyrimRenderer] Head preview created for 0x{:X} ('{}'): {} shapes, {}",
                         actorFormID, npc->GetFullName(), drivenShapes_.size(),
                         !gpuPose_.empty()          ? "on the NIF bind pose"
-                        : HeadUsesNifBindPose()    ? "drawn as stored (NIF bind pose failed)"
+                        : RestsOnNifBindPose()     ? "drawn as stored (NIF bind pose failed)"
                                                    : "drawn as stored (player live face)");
         return;
     }
@@ -476,21 +476,20 @@ Result ActorPreview::LoadHeadOnly(RE::TESNPC* npc) {
     // animation, so it gets that skeleton's bind pose: vanilla FaceGen NIFs
     // store their vertices in the head bone's skin space (~115 units below the
     // posed head) and were drawn out of frame without one.
-    if (HeadUsesNifBindPose()) ApplyNifBindPose();
+    if (RestsOnNifBindPose()) ApplyNifBindPose();
     return Result::Success;
 }
 
-bool ActorPreview::HeadUsesNifBindPose() const {
-    // The player's live face is uploaded as stored and its bounds are taken
-    // from those positions, so it keeps the unposed draw it is framed for.
-    return headOnly_ && headSource_.source != SKYRIMRENDERER_HEAD_SOURCE_PLAYER;
+bool ActorPreview::RestsOnNifBindPose() const {
+    // The player's live face in a head preview is uploaded as stored and its
+    // bounds are taken from those positions, so it keeps the unposed draw it
+    // is framed for. Everything else is skin-space geometry that only lands
+    // where the body is when it is skinned.
+    return !(headOnly_ && headSource_.source == SKYRIMRENDERER_HEAD_SOURCE_PLAYER);
 }
 
 void ActorPreview::ResetGPUSkinningPose() {
-    if (HeadUsesNifBindPose()) {
-        ApplyNifBindPose();
-        return;
-    }
+    if (RestsOnNifBindPose() && ApplyNifBindPose()) return;
     gpuPose_.clear();
     scene_.SetGPUSkinningPose(nullptr);
 }
@@ -1002,34 +1001,13 @@ Result ActorPreview::LoadAnimation(const char* animationPath) {
     // Cache full NIF skeleton for hierarchy propagation. Extra bones (hair, physics,
     // modded skeleton additions) need to follow their animated parents.
     if (nifSkeleton_.bones.empty() && !skeletonNifPath_.empty()) {
-        if (ExtractSkeletonFromNif(skeletonNifPath_, nifSkeleton_)) {
-            for (const auto& bone : nifSkeleton_.bones) {
-                nifBindPoseFallback_[bone.name] = bone.globalTransform;
-            }
+        if (EnsureNifSkeleton()) {
             SKSE::log::info("[SkyrimRenderer] Cached NIF skeleton '{}' ({} bones, {} in HKX) for hierarchy propagation",
                          skeletonNifPath_, nifSkeleton_.bones.size(),
                          skeleton_ ? skeleton_->bones.size() : 0);
         } else {
             SKSE::log::warn("[SkyrimRenderer] Failed to extract NIF skeleton from '{}' — "
                             "modded skeleton bones will NOT be propagated", skeletonNifPath_);
-        }
-        // Merge bone hierarchies from already-loaded mesh NIFs.
-        // Meshes may have custom bones (hair, cloth) not in skeleton.nif.
-        if (!loadedMeshNifPaths_.empty()) {
-            uint32_t totalMerged = 0;
-            for (const auto& meshPath : loadedMeshNifPaths_) {
-                uint32_t merged = MergeMeshBonesIntoSkeleton(meshPath, nifSkeleton_);
-                if (merged > 0) {
-                    for (size_t i = nifSkeleton_.bones.size() - merged; i < nifSkeleton_.bones.size(); ++i) {
-                        nifBindPoseFallback_[nifSkeleton_.bones[i].name] = nifSkeleton_.bones[i].globalTransform;
-                    }
-                    totalMerged += merged;
-                }
-            }
-            if (totalMerged > 0) {
-                SKSE::log::info("[SkyrimRenderer] Merged {} mesh bones into NIF skeleton at animation load ({} total)",
-                                totalMerged, nifSkeleton_.bones.size());
-            }
         }
     } else if (nifSkeleton_.bones.empty() && skeletonNifPath_.empty()) {
         SKSE::log::warn("[SkyrimRenderer] No skeleton NIF path set — bone propagation disabled");
@@ -1058,23 +1036,7 @@ void ActorPreview::ApplyPreloadedAnimation(const char* animationPath,
     skeleton_ = std::move(skeleton);
 
     // Cache NIF skeleton for hierarchy propagation (same as LoadAnimation)
-    if (nifSkeleton_.bones.empty() && !skeletonNifPath_.empty()) {
-        if (ExtractSkeletonFromNif(skeletonNifPath_, nifSkeleton_)) {
-            for (const auto& bone : nifSkeleton_.bones) {
-                nifBindPoseFallback_[bone.name] = bone.globalTransform;
-            }
-        }
-        if (!loadedMeshNifPaths_.empty()) {
-            for (const auto& meshPath : loadedMeshNifPaths_) {
-                uint32_t merged = MergeMeshBonesIntoSkeleton(meshPath, nifSkeleton_);
-                if (merged > 0) {
-                    for (size_t i = nifSkeleton_.bones.size() - merged; i < nifSkeleton_.bones.size(); ++i) {
-                        nifBindPoseFallback_[nifSkeleton_.bones[i].name] = nifSkeleton_.bones[i].globalTransform;
-                    }
-                }
-            }
-        }
-    }
+    EnsureNifSkeleton();
 
     if (!animController_) {
         animController_ = std::make_unique<AnimationController>();
@@ -1149,21 +1111,43 @@ void ActorPreview::SetUseRefPoseLocals(bool use) {
     if (animController_) animController_->SetUseRefPoseLocals(use);
 }
 
-void ActorPreview::ApplyNifBindPose() {
-    if (!useGPUSkinning_ || skeletonNifPath_.empty()) return;
+bool ActorPreview::EnsureNifSkeleton() {
+    if (!nifSkeleton_.bones.empty()) return true;
+    if (skeletonNifPath_.empty()) return false;
+    if (!ExtractSkeletonFromNif(skeletonNifPath_, nifSkeleton_)) return false;
+    for (const auto& bone : nifSkeleton_.bones) {
+        nifBindPoseFallback_[bone.name] = bone.globalTransform;
+    }
+    // Merge bone hierarchies from already-loaded mesh NIFs: meshes may have
+    // custom bones (hair, cloth) not in skeleton.nif. Later rebuilds merge
+    // their own NIFs at the end of RebuildMeshes.
+    uint32_t totalMerged = 0;
+    for (const auto& meshPath : loadedMeshNifPaths_) {
+        uint32_t merged = MergeMeshBonesIntoSkeleton(meshPath, nifSkeleton_);
+        if (merged > 0) {
+            for (size_t i = nifSkeleton_.bones.size() - merged; i < nifSkeleton_.bones.size(); ++i) {
+                nifBindPoseFallback_[nifSkeleton_.bones[i].name] = nifSkeleton_.bones[i].globalTransform;
+            }
+            totalMerged += merged;
+        }
+    }
+    if (totalMerged > 0) {
+        SKSE::log::info("[SkyrimRenderer] Merged {} mesh bones into NIF skeleton ({} total)",
+                        totalMerged, nifSkeleton_.bones.size());
+    }
+    return true;
+}
 
-    // Build the NIF skeleton if not already populated.
-    if (nifSkeleton_.bones.empty()) {
-        if (!ExtractSkeletonFromNif(skeletonNifPath_, nifSkeleton_)) {
-            SKSE::log::warn("[SkyrimRenderer] ApplyNifBindPose: failed to extract NIF skeleton");
-            return;
-        }
-        for (const auto& bone : nifSkeleton_.bones) {
-            nifBindPoseFallback_[bone.name] = bone.globalTransform;
-        }
+bool ActorPreview::ApplyNifBindPose() {
+    if (!useGPUSkinning_ || skeletonNifPath_.empty()) return false;
+
+    if (!EnsureNifSkeleton()) {
+        SKSE::log::warn("[SkyrimRenderer] ApplyNifBindPose: failed to extract NIF skeleton '{}'", skeletonNifPath_);
+        return false;
     }
 
     ApplyPoseGPUSkinning(nifBindPoseFallback_);
+    return true;
 }
 
 bool ActorPreview::TickAnimation(float deltaSeconds) {
@@ -2404,6 +2388,13 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     // Hair is hidden when EITHER Hair (slot 31, bit 1) or LongHair (slot 41, bit 11) is covered.
     // Many wig mods only claim LongHair, not Hair.
     bool hairCovered = (addonCoveredSlots & ((1u << 1) | (1u << 11)));  // slot 31 or slot 41
+    // Partition filter for the head NIF (FaceGen / player head), where baked
+    // hair shapes carry partitions 131 (Hair) / 141 (LongHair). Only hair is
+    // filtered, on ARMA coverage like the separate hair parts below. The ARMO
+    // mask must not reach the head: SkinNaked's ARMO claims slot 30 (Head) and
+    // slot 32, which erased the face (partition 130) and the eyes, brows and
+    // mouth (partition 32) of every NPC wearing it.
+    const uint32_t headPartitionFilter = hairCovered ? ((1u << 1) | (1u << 11)) : 0u;
 
     std::string faceGenPath;
     size_t faceGenBatchIndex = SIZE_MAX;
@@ -2455,7 +2446,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                             playerFacePart && playerFacePart->GetFormEditorID() ? playerFacePart->GetFormEditorID() : "(none)",
                             faceGenPath);
             faceGenBatchIndex = batchRequests.size();
-            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, coveredSlotMask});
+            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, headPartitionFilter});
             if (playerFacePart) headPartBatch.emplace_back(playerFacePart, faceGenBatchIndex);
             headSource_ = {2 /* SKYRIMRENDERER_HEAD_SOURCE_PLAYER */, faceGenPath, visualNPC, false};
 
@@ -2496,7 +2487,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             }
             headSource_.faceGenPath = faceGenPath;
             faceGenBatchIndex = batchRequests.size();
-            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, coveredSlotMask});
+            batchRequests.push_back({faceGenPath, MeshTag::Body, skelPath, -1.0f, useGPUSkinning_, headPartitionFilter});
 
             // Optimistically add head parts too — they'll load in parallel.
             // If FaceGen has baked parts, we'll remove the duplicates after.
@@ -2925,6 +2916,14 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         animController_->GetState() != PlaybackState::Stopped) {
         auto pose = animController_->EvaluatePose();
         ApplyPoseGPUSkinning(pose);
+    } else if (useGPUSkinning_ && !headOnly_ && (!animController_ || gpuPose_.empty())) {
+        // No animation pose: skin the meshes on the race skeleton NIF's bind
+        // pose. Drawn unskinned, vanilla FaceGen heads (stored in head-bone
+        // skin space) would sit ~115 units below the body.
+        if (ApplyNifBindPose()) {
+            SKSE::log::info("[SkyrimRenderer] Full preview on the NIF bind pose ({} bones, no animation)",
+                            gpuPose_.size());
+        }
     }
 
     if (headOnly_) BuildDrivenHead(partsByMesh);

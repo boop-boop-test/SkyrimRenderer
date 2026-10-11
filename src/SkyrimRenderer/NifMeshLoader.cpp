@@ -1207,7 +1207,13 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         //   30-61: SBP_30_HEAD .. SBP_61_FX01 → biped slot bit = partID - 30
         //   130-150: SBP_130_HEAD .. SBP_150_DECAPITATEDHEAD → same as 30-50
         //   0-13, 101-113, 201+: gore/caps, not biped slots → never filtered
-        if (partitionFilter != 0 && !indices.empty()) {
+        // Only a BSDismemberSkinInstance has body-part IDs. For a plain
+        // NiSkinInstance nifly invents one partition per skin partition with
+        // ID 32 (Body), which would drop e.g. vanilla FaceGen eyes, brows and
+        // mouth whenever slot 32 is covered.
+        const bool hasDismemberParts =
+            nif.GetHeader().GetBlock<nifly::BSDismemberSkinInstance>(shape->SkinInstanceRef()) != nullptr;
+        if (partitionFilter != 0 && !indices.empty() && hasDismemberParts) {
             nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
             std::vector<int> triParts;
             if (nif.GetShapePartitions(shape, partInfo, triParts) && !triParts.empty()) {
