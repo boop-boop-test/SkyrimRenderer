@@ -116,7 +116,10 @@ extern "C" {
 //       skeleton NIF's bind pose itself (where the camera presets frame it);
 //       before, clients called ApplyNifBindPose. A repeat call is harmless.
 //   7 - camera preset 4 = FaceClose (SetCameraPreset), build 1.5.0
-#define SKYRIMRENDERER_API_VERSION 7
+//   8 - per-mod state (build 1.7.0): callbacks are per calling mod and every
+//       mod's runs; Shutdown releases only the caller's scenes, actors,
+//       overlays and callbacks. No new calls; same signatures.
+#define SKYRIMRENDERER_API_VERSION 8
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -131,11 +134,12 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetBuildVersion(void);
 
 // --- Lifecycle -------------------------------------------------------------
 
-// One DLL serves every mod in the process. The callbacks, the Present hook
-// and Shutdown are process-wide: a single composite consumer (DressCode) owns
-// them. Other mods use texture mode (SetSceneTextureMode / RenderToTexture /
-// GetSceneTexture), set no callbacks and never call Shutdown; they destroy
-// only their own scenes. Per-consumer callbacks and shutdown are planned.
+// One DLL serves every mod in the process. From API 8 it tracks which mod
+// (calling module) made each call: scenes and overlays belong to the mod that
+// created them, each mod has its own callbacks, and Shutdown releases only the
+// caller's. The Present hook and caches are shared and go with the last mod.
+// Before API 8 the callbacks and Shutdown were process-wide: on an older DLL,
+// only one composite consumer may set callbacks or call Shutdown.
 
 // Hook IDXGISwapChain::Present for frame-synced rendering and backbuffer
 // compositing (SetCompositeRect / overlays). Only composite consumers need it;
@@ -150,13 +154,16 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetShaderDirectory(const wchar_t* dir);
 // Compile shaders on a background thread to avoid first-render stalls.
 SKYRIMRENDERER_API void SkyrimRenderer_PrecompileShaders(void);
 
-// Tear down all scenes and actors.
+// Tear down the calling mod's scenes, actors, overlays and callbacks; the last
+// mod out also removes the Present hook and caches. (Before API 8: everything.)
 SKYRIMRENDERER_API void SkyrimRenderer_Shutdown(void);
 
-// Register/unregister render-complete callback. Pass NULL to clear.
+// Set/clear the calling mod's render-complete callback. Pass NULL to clear.
+// Readback pixels go to the mod that created the scene. (API 8: per mod.)
 SKYRIMRENDERER_API void SkyrimRenderer_SetRenderCompleteCallback(SkyrimRenderer_RenderCallback callback);
 
-// Register/unregister per-frame callback. Pass NULL to clear.
+// Set/clear the calling mod's per-frame callback. Pass NULL to clear. Every
+// mod's callback runs each frame. (API 8: per mod.)
 SKYRIMRENDERER_API void SkyrimRenderer_SetPerFrameCallback(SkyrimRenderer_FrameCallback callback);
 
 // --- Scene -----------------------------------------------------------------
