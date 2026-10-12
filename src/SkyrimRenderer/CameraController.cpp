@@ -263,9 +263,11 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     // The parts: the FaceGen-shaded face (the largest such shape), the eyes
     // (eye shader), mouth and brows by head part name (FaceGen NIFs name each
     // shape after its head part; the Face preset finds the mouth the same way).
+    // Some custom heads give the eyes a plain env-map shader instead (LydiaDF's
+    // 'LDFEyes'); with no eye-shader shape, eyes are found by name too.
     const LoadedMesh* face = nullptr;
     const LoadedMesh* mouth = nullptr;
-    std::vector<const LoadedMesh*> eyes, brows;
+    std::vector<const LoadedMesh*> eyes, eyesByName, brows;
     for (const auto& m : meshes) {
         if (m.shadingModel == ShadingModel::FaceGen) {
             if (!face || m.vertexCount > face->vertexCount) face = &m;
@@ -275,8 +277,17 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
         const std::string lower = Lower(m.name);
         if (!mouth && lower.find("mouth") != std::string::npos) mouth = &m;
         else if (lower.find("brow") != std::string::npos) brows.push_back(&m);
+        else if (lower.find("eye") != std::string::npos && lower.find("lash") == std::string::npos &&
+                 lower.find("shadow") == std::string::npos && lower.find("liner") == std::string::npos) {
+            eyesByName.push_back(&m);
+        }
     }
-    if (!face || eyes.empty() || !mouth) return false;
+    if (eyes.empty()) eyes = std::move(eyesByName);
+    if (!face || eyes.empty() || !mouth) {
+        SKSE::log::info("[SkyrimRenderer] FaceClose: no {} shape; framing as HeadShot",
+                        !face ? "FaceGen face" : eyes.empty() ? "eye" : "mouth");
+        return false;
+    }
 
     std::vector<const LoadedMesh*> parts = {face, mouth};
     parts.insert(parts.end(), eyes.begin(), eyes.end());
@@ -306,7 +317,11 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     const float eyeHeight = eyeBox.max[2] - eyeBox.min[2];
     const float mouthZ = mouthBox.Center(2);
     const float eyeToMouth = eyeZ - mouthZ;
-    if (!faceBox.Valid() || eyeHeight <= 0.0f || eyeToMouth <= 0.0f) return false;   // not an upright face
+    if (!faceBox.Valid() || eyeHeight <= 0.0f || eyeToMouth <= 0.0f) {   // not an upright face
+        SKSE::log::info("[SkyrimRenderer] FaceClose: eyes {:.2f} not above mouth {:.2f}; framing as HeadShot",
+                        eyeZ, mouthZ);
+        return false;
+    }
 
     // Brows: a brow shape centred between the eyes and one eye-to-mouth
     // distance above them (measured brow tops reach 0.75 of it at most).
@@ -346,7 +361,11 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
         }
     }
     const float height = top - bottom;
-    if (height <= 0.0f) return false;
+    if (height <= 0.0f) {
+        SKSE::log::info("[SkyrimRenderer] FaceClose: brows {:.2f} not above chin {:.2f}; framing as HeadShot",
+                        top, bottom);
+        return false;
+    }
 
     // Fitted at the front of the eyes, the plane the brows and chin sit near.
     const float tanHalf = std::tan(fov_ * 0.5f * kDegToRadF);
