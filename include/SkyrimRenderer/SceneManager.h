@@ -7,11 +7,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace SkyrimRenderer {
@@ -20,6 +22,10 @@ namespace SkyrimRenderer {
 /// Receives scene handle, RGBA pixel data, width, height.
 using RenderCompleteCallback = std::function<void(
     SceneHandle, const std::vector<uint8_t>&, uint32_t, uint32_t)>;
+
+/// The mod a call came from (the calling module's HMODULE; 0 = internal).
+/// Scenes, overlays and callbacks belong to the consumer that made them.
+using ConsumerId = std::uintptr_t;
 
 /// Top-level API for creating and managing render scenes and actor previews.
 ///
@@ -34,6 +40,10 @@ using RenderCompleteCallback = std::function<void(
 ///     RenderToTexture() from the game's main thread inside the frame and samples
 ///     the scene's SRV itself. Nothing is drawn at Present, so frame generation
 ///     and HUD-fix layers cannot drop it.
+///
+/// Several mods share one instance. Each consumer has its own callbacks, and
+/// Shutdown(consumer) releases only what that consumer made; the shared state
+/// (Present hook, caches) goes when the last consumer leaves.
 class SceneManager {
 public:
     static SceneManager& GetInstance();
@@ -44,7 +54,7 @@ public:
     /// and backbuffer compositing. Only composite consumers need it. Call once
     /// after the DX11 device is available. Returns false on failure or when the
     /// game swapchain's vtable is not trusted.
-    bool InstallPresentHook();
+    bool InstallPresentHook(ConsumerId consumer = 0);
 
     bool IsPresentHookInstalled() const { return hookInstalled_; }
 
@@ -64,8 +74,9 @@ public:
     /// their texture; any other scene renders and reads back to the callback.
     void RequestRender(SceneHandle scene);
 
-    /// Register a callback to receive completed render data.
-    void SetRenderCompleteCallback(RenderCompleteCallback callback);
+    /// Set `consumer`'s callback for completed render data (null clears it).
+    /// Readbacks go to the callback of the consumer that owns the scene.
+    void SetRenderCompleteCallback(RenderCompleteCallback callback, ConsumerId consumer = 0);
 
     // ── Texture Mode ───────────────────────────────────────────────────────
 
@@ -110,7 +121,7 @@ public:
     // ── Scene API ───────────────────────────────────────────────────────────
 
     /// Create a new render scene at the given resolution.
-    SceneHandle CreateScene(uint32_t width, uint32_t height);
+    SceneHandle CreateScene(uint32_t width, uint32_t height, ConsumerId owner = 0);
 
     /// Get a scene by handle.
     RenderScene* GetScene(SceneHandle handle);
@@ -213,7 +224,8 @@ public:
     /// @param width          Display width in screen pixels.
     /// @param height         Display height in screen pixels.
     /// @returns              Handle to the overlay, or Invalid on failure.
-    OverlayHandle AddOverlay(const wchar_t* imageFilePath, float width, float height);
+    OverlayHandle AddOverlay(const wchar_t* imageFilePath, float width, float height,
+                             ConsumerId owner = 0);
 
     /// Update the screen position of an overlay (top-left corner, in pixels).
     void SetOverlayPosition(OverlayHandle overlay, float x, float y);
@@ -316,13 +328,18 @@ public:
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
-    /// Register a callback that fires every frame from the Present hook,
-    /// before any rendering or compositing. Useful for flushing deferred work.
+    /// Set `consumer`'s callback that fires every frame from the Present hook,
+    /// before any rendering or compositing (null clears it). Every consumer's
+    /// callback runs. Useful for flushing deferred work.
     using PerFrameCallback = std::function<void()>;
-    void SetPerFrameCallback(PerFrameCallback callback);
+    void SetPerFrameCallback(PerFrameCallback callback, ConsumerId consumer = 0);
 
-    /// Clean up all scenes and actors. Called on game shutdown.
-    void Shutdown();
+    /// Release `consumer`'s scenes (with their actors), overlays and callbacks.
+    /// When no consumer is left, also tears down the shared state (ShutdownAll).
+    void Shutdown(ConsumerId consumer);
+
+    /// Tear down everything for every consumer. Called on process exit.
+    void ShutdownAll();
 
 private:
     SceneManager() = default;
@@ -343,8 +360,11 @@ private:
                                uint32_t bbWidth, uint32_t bbHeight,
                                RenderScene* scene, const ScreenRect& rect);
 
-    /// Uninstall the Present hook. Called by Shutdown().
+    /// Uninstall the Present hook. Called by TeardownLocked().
     void UninstallPresentHook();
+
+    /// Release every consumer's state and the shared state. Caller holds mutex_.
+    void TeardownLocked();
 
     /// Render with the device-lost guard: refuses after a loss, checks
     /// GetDeviceRemovedReason afterwards and latches the loss.
@@ -385,8 +405,13 @@ private:
     // Pending render requests
     std::vector<SceneHandle> pendingRenders_;
 
-    // Render completion callback (used when NOT compositing)
-    RenderCompleteCallback renderCompleteCallback_;
+    // Consumers (mods) holding scenes, overlays, callbacks or the Present hook
+    std::unordered_set<ConsumerId> consumers_;
+    std::unordered_map<uint32_t, ConsumerId> sceneOwners_;    // SceneHandle -> owner
+    std::unordered_map<uint32_t, ConsumerId> overlayOwners_;  // OverlayHandle -> owner
+
+    // Render completion callbacks, per consumer (used when NOT compositing)
+    std::unordered_map<ConsumerId, RenderCompleteCallback> renderCompleteCallbacks_;
 
     // Async readback state (only active for scenes without a composite rect)
     std::vector<uint8_t> pixelBuffer_;          // pre-allocated, reused across frames
@@ -407,8 +432,11 @@ private:
     uint32_t nextOverlayHandle_ = 1;
     std::unordered_map<uint32_t, uint32_t> overlayToScene_;  // OverlayHandle → SceneHandle
 
-    // Per-frame callback (fires from Present hook before render/composite)
-    PerFrameCallback perFrameCallback_;
+    // Per-frame callbacks, per consumer (fire from Present hook before
+    // render/composite). The hook runs an immutable snapshot, rebuilt on change.
+    std::unordered_map<ConsumerId, PerFrameCallback> perFrameCallbacks_;
+    std::shared_ptr<const std::vector<PerFrameCallback>> perFrameSnapshot_;
+    void RebuildPerFrameSnapshot();  // caller holds mutex_
 
     // Work queued for the next Tick() (main thread)
     std::mutex tickTasksMutex_;

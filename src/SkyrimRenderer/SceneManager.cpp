@@ -23,16 +23,32 @@ SceneManager& SceneManager::GetInstance() {
 }
 
 SceneManager::~SceneManager() {
-    Shutdown();
+    ShutdownAll();
 }
 
 // ============================================================================
 // Present Hook
 // ============================================================================
 
-void SceneManager::SetPerFrameCallback(PerFrameCallback callback) {
+void SceneManager::SetPerFrameCallback(PerFrameCallback callback, ConsumerId consumer) {
     std::lock_guard lock(mutex_);
-    perFrameCallback_ = std::move(callback);
+    if (callback) {
+        perFrameCallbacks_[consumer] = std::move(callback);
+        consumers_.insert(consumer);
+    } else {
+        perFrameCallbacks_.erase(consumer);
+    }
+    RebuildPerFrameSnapshot();
+}
+
+void SceneManager::RebuildPerFrameSnapshot() {
+    if (perFrameCallbacks_.empty()) {
+        perFrameSnapshot_.reset();
+        return;
+    }
+    auto list = std::make_shared<std::vector<PerFrameCallback>>();
+    for (const auto& [consumer, cb] : perFrameCallbacks_) list->push_back(cb);
+    perFrameSnapshot_ = std::move(list);
 }
 
 namespace {
@@ -95,15 +111,22 @@ HRESULT STDMETHODCALLTYPE SceneManager::HookedPresent(
         return originalPresent_(swapChain, syncInterval, flags);
     }
 
-    static uint32_t presentDiagCount = 0;
-    if (++presentDiagCount % 300 == 1) {
-        SKSE::log::info("[SkyrimRenderer] HookedPresent heartbeat: perFrameCallbackSet={}",
-                        static_cast<bool>(inst.perFrameCallback_));
+    // Run the callbacks outside the lock: they call back into the API.
+    std::shared_ptr<const std::vector<PerFrameCallback>> perFrame;
+    {
+        std::lock_guard lock(inst.mutex_);
+        perFrame = inst.perFrameSnapshot_;
     }
 
-    // 0. Per-frame callback (e.g., flush deferred renders)
-    if (inst.perFrameCallback_) {
-        inst.perFrameCallback_();
+    static uint32_t presentDiagCount = 0;
+    if (++presentDiagCount % 300 == 1) {
+        SKSE::log::info("[SkyrimRenderer] HookedPresent heartbeat: perFrameCallbacks={}",
+                        perFrame ? perFrame->size() : 0);
+    }
+
+    // 0. Per-frame callbacks (e.g., flush deferred renders)
+    if (perFrame) {
+        for (const auto& cb : *perFrame) cb();
     }
 
     // 1. Animations + offscreen renders / readbacks
@@ -205,7 +228,11 @@ void SceneManager::LogPresentLayers(const void* presentSlot) {
     }
 }
 
-bool SceneManager::InstallPresentHook() {
+bool SceneManager::InstallPresentHook(ConsumerId consumer) {
+    // Held throughout: two installs racing would hook HookedPresent onto
+    // itself, and a racing last-consumer Shutdown would orphan the hook.
+    std::lock_guard lock(mutex_);
+    consumers_.insert(consumer);
     if (hookInstalled_) return true;
 
     auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -328,9 +355,14 @@ void SceneManager::RequestRender(SceneHandle scene) {
     pendingRenders_.push_back(scene);
 }
 
-void SceneManager::SetRenderCompleteCallback(RenderCompleteCallback callback) {
+void SceneManager::SetRenderCompleteCallback(RenderCompleteCallback callback, ConsumerId consumer) {
     std::lock_guard lock(mutex_);
-    renderCompleteCallback_ = std::move(callback);
+    if (callback) {
+        renderCompleteCallbacks_[consumer] = std::move(callback);
+        consumers_.insert(consumer);
+    } else {
+        renderCompleteCallbacks_.erase(consumer);
+    }
 }
 
 void SceneManager::ProcessPendingRenders() {
@@ -373,7 +405,14 @@ void SceneManager::ProcessPendingRenders() {
         }
         pendingRenders_.clear();
 
-        callback = renderCompleteCallback_;
+        // The pending readback's pixels go to the consumer that owns its scene
+        if (readbackPending_) {
+            auto owner = sceneOwners_.find(static_cast<uint32_t>(readbackScene_));
+            if (owner != sceneOwners_.end()) {
+                auto cb = renderCompleteCallbacks_.find(owner->second);
+                if (cb != renderCompleteCallbacks_.end()) callback = cb->second;
+            }
+        }
     }
 
     // Phase 1: Try to collect previous frame's readback (non-blocking)
@@ -474,7 +513,7 @@ void SceneManager::PrecompileShaders() {
 // Scene API
 // ============================================================================
 
-SceneHandle SceneManager::CreateScene(uint32_t width, uint32_t height) {
+SceneHandle SceneManager::CreateScene(uint32_t width, uint32_t height, ConsumerId owner) {
     std::lock_guard lock(mutex_);
 
     auto scene = std::make_unique<RenderScene>(width, height, shaderDir_);
@@ -485,6 +524,8 @@ SceneHandle SceneManager::CreateScene(uint32_t width, uint32_t height) {
 
     uint32_t id = nextSceneHandle_++;
     scenes_[id] = std::move(scene);
+    sceneOwners_[id] = owner;
+    consumers_.insert(owner);
 
     SKSE::log::info("[SkyrimRenderer] Created scene {} ({}x{})", id, width, height);
     return static_cast<SceneHandle>(id);
@@ -719,6 +760,7 @@ void SceneManager::DestroyScene(SceneHandle handle) {
     }
 
     scenes_.erase(id);
+    sceneOwners_.erase(id);
     SKSE::log::info("[SkyrimRenderer] Destroyed scene {}", id);
 }
 
@@ -1146,7 +1188,8 @@ void SceneManager::ClearCompositeRect(SceneHandle scene) {
 // Screen-Space Overlays
 // ============================================================================
 
-OverlayHandle SceneManager::AddOverlay(const wchar_t* imageFilePath, float width, float height) {
+OverlayHandle SceneManager::AddOverlay(const wchar_t* imageFilePath, float width, float height,
+                                       ConsumerId owner) {
     if (!imageFilePath || width <= 0 || height <= 0) return OverlayHandle::Invalid;
 
     // Need the D3D11 device for texture loading
@@ -1170,6 +1213,8 @@ OverlayHandle SceneManager::AddOverlay(const wchar_t* imageFilePath, float width
         .rect = {0.0f, 0.0f, width, height},
         .visible = true
     };
+    overlayOwners_[id] = owner;
+    consumers_.insert(owner);
 
     SKSE::log::info("[SkyrimRenderer] Added overlay {} ({}x{})", id, width, height);
     return static_cast<OverlayHandle>(id);
@@ -1206,6 +1251,7 @@ void SceneManager::RemoveOverlay(OverlayHandle overlay) {
     uint32_t id = static_cast<uint32_t>(overlay);
     overlays_.erase(id);
     overlayToScene_.erase(id);
+    overlayOwners_.erase(id);
 }
 
 void SceneManager::AttachOverlayToScene(OverlayHandle overlay, SceneHandle scene) {
@@ -1223,9 +1269,40 @@ void SceneManager::DetachOverlayFromScene(OverlayHandle overlay) {
 // Lifecycle
 // ============================================================================
 
-void SceneManager::Shutdown() {
-    std::lock_guard lock(mutex_);
+void SceneManager::Shutdown(ConsumerId consumer) {
+    std::vector<uint32_t> scenes, overlays;
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& [id, owner] : sceneOwners_) {
+            if (owner == consumer) scenes.push_back(id);
+        }
+        for (const auto& [id, owner] : overlayOwners_) {
+            if (owner == consumer) overlays.push_back(id);
+        }
+        renderCompleteCallbacks_.erase(consumer);
+        perFrameCallbacks_.erase(consumer);
+        RebuildPerFrameSnapshot();
+        consumers_.erase(consumer);
+    }
 
+    for (auto id : scenes) DestroyScene(static_cast<SceneHandle>(id));
+    for (auto id : overlays) RemoveOverlay(static_cast<OverlayHandle>(id));
+
+    // Decide "last" and tear down under one lock: a consumer that registered
+    // while the scenes above were destroyed keeps the shared state alive.
+    std::lock_guard lock(mutex_);
+    const bool last = consumers_.empty();
+    SKSE::log::info("[SkyrimRenderer] Consumer {:#x} shut down ({} scenes, {} overlays){}", consumer,
+                    scenes.size(), overlays.size(), last ? "; last consumer" : "");
+    if (last) TeardownLocked();
+}
+
+void SceneManager::ShutdownAll() {
+    std::lock_guard lock(mutex_);
+    TeardownLocked();
+}
+
+void SceneManager::TeardownLocked() {
     UninstallPresentHook();
 
     actors_.clear();
@@ -1235,6 +1312,12 @@ void SceneManager::Shutdown() {
     compositeRects_.clear();
     overlays_.clear();
     overlayToScene_.clear();
+    consumers_.clear();
+    sceneOwners_.clear();
+    overlayOwners_.clear();
+    renderCompleteCallbacks_.clear();
+    perFrameCallbacks_.clear();
+    perFrameSnapshot_.reset();
     quadRenderer_.Release();
     readbackPending_ = false;
     readbackScene_ = SceneHandle::Invalid;

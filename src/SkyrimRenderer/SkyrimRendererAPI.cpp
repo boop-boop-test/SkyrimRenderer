@@ -12,6 +12,8 @@
 
 #include <spdlog/sinks/basic_file_sink.h>
 
+#include <intrin.h>
+
 #include <algorithm>
 #include <cstring>
 #include <mutex>
@@ -36,6 +38,18 @@ struct StringListData {
 std::mutex g_stringListMutex;
 std::unordered_map<uint32_t, StringListData> g_stringLists;
 uint32_t g_nextStringListId = 1;
+
+/// The mod whose code called an export: the module holding the return
+/// address. Owns the scenes, overlays and callbacks the call creates.
+ConsumerId CallerModule(void* returnAddress) {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       static_cast<LPCWSTR>(returnAddress), &module);
+    return reinterpret_cast<ConsumerId>(module);
+}
+
+// Only valid directly inside an exported function.
+#define SKYRIMRENDERER_CALLER CallerModule(_ReturnAddress())
 
 inline SceneHandle ToScene(uint32_t h) { return static_cast<SceneHandle>(h); }
 inline ActorHandle ToActor(uint32_t h) { return static_cast<ActorHandle>(h); }
@@ -142,7 +156,7 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetBuildVersion(void) {
 
 
 SKYRIMRENDERER_API int32_t SkyrimRenderer_InstallPresentHook(void) {
-    return SceneManager::GetInstance().InstallPresentHook() ? 1 : 0;
+    return SceneManager::GetInstance().InstallPresentHook(SKYRIMRENDERER_CALLER) ? 1 : 0;
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetShaderDirectory(const wchar_t* dir) {
@@ -154,32 +168,35 @@ SKYRIMRENDERER_API void SkyrimRenderer_PrecompileShaders(void) {
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_Shutdown(void) {
-    SceneManager::GetInstance().Shutdown();
+    SceneManager::GetInstance().Shutdown(SKYRIMRENDERER_CALLER);
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetRenderCompleteCallback(SkyrimRenderer_RenderCallback callback) {
+    const auto consumer = SKYRIMRENDERER_CALLER;
     if (!callback) {
-        SceneManager::GetInstance().SetRenderCompleteCallback(nullptr);
+        SceneManager::GetInstance().SetRenderCompleteCallback(nullptr, consumer);
         return;
     }
     SceneManager::GetInstance().SetRenderCompleteCallback(
         [callback](SceneHandle scene, const std::vector<uint8_t>& pixels, uint32_t w, uint32_t h) {
             callback(static_cast<uint32_t>(scene), pixels.data(),
                      static_cast<uint32_t>(pixels.size()), w, h);
-        });
+        },
+        consumer);
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetPerFrameCallback(SkyrimRenderer_FrameCallback callback) {
+    const auto consumer = SKYRIMRENDERER_CALLER;
     if (!callback) {
-        SceneManager::GetInstance().SetPerFrameCallback(nullptr);
+        SceneManager::GetInstance().SetPerFrameCallback(nullptr, consumer);
         return;
     }
-    SceneManager::GetInstance().SetPerFrameCallback([callback]() { callback(); });
+    SceneManager::GetInstance().SetPerFrameCallback([callback]() { callback(); }, consumer);
 }
 
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_CreateScene(uint32_t width, uint32_t height) {
-    return static_cast<uint32_t>(SceneManager::GetInstance().CreateScene(width, height));
+    return static_cast<uint32_t>(SceneManager::GetInstance().CreateScene(width, height, SKYRIMRENDERER_CALLER));
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_DestroyScene(uint32_t scene) {
@@ -539,7 +556,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearActorMorphs(uint32_t actor) {
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_AddOverlay(
     const wchar_t* imagePath, float width, float height) {
     return static_cast<uint32_t>(
-        SceneManager::GetInstance().AddOverlay(imagePath, width, height));
+        SceneManager::GetInstance().AddOverlay(imagePath, width, height, SKYRIMRENDERER_CALLER));
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetOverlayPosition(uint32_t overlay, float x, float y) {
