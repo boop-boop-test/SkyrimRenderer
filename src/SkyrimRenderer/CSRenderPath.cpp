@@ -371,18 +371,18 @@ void CSRenderPath::BeginFrame(ID3D11DeviceContext*, const FrameInputs& frame) {
     frame_ = frame;
 }
 
-void CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool gpuSkinned,
+bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool gpuSkinned,
                         ID3D11InputLayout* layout, ID3D11SamplerState* sampler) {
     std::lock_guard lock(mutex_);
     const auto descriptor = DescriptorFor(mesh);
     auto* shader = descriptor ? GetShader(*descriptor) : nullptr;
-    if (!shader) return;
+    if (!shader) return false;
     const auto& refl = shader->reflection;
 
     const bool eye = mesh.shadingModel == ShadingModel::EyeEnvMap;
     const bool msn = HasFlag(mesh.shaderFlags, ShaderFlags::ModelSpaceNormals);
     auto* vs = GetBridgeVS(gpuSkinned, eye, msn);
-    if (!vs) return;
+    if (!vs) return false;
 
     // ── Constant buffers: ours by name, CS's live ones as-is, unknown zeroed ──
     const auto camera = frame_.cameraPos;
@@ -628,6 +628,7 @@ void CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
     for (auto* s : saved) {
         if (s) s->Release();
     }
+    return true;
 }
 
 } // namespace SkyrimRenderer

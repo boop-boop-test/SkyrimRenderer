@@ -153,12 +153,29 @@ private:
     const NifHeaderInfo& header_;
 };
 
+/// Bytes one BSVertexDataSSE record needs for attribute flags `a`.
+uint32_t VertexBytesSSE(uint16_t a) {
+    uint32_t n = 0;
+    if (a & kVertex) n += 16;
+    if (a & kUV) n += 4;
+    if (a & kNormal) n += (a & kTangent) ? 8 : 4;
+    if (a & kColors) n += 4;
+    if (a & kSkinned) n += 12;
+    if (a & kEyeData) n += 4;
+    return n;
+}
+
 /// Decodes `count` BSVertexDataSSE records laid out with `desc`.
 std::vector<Vertex> ReadVerticesSSE(Reader& r, uint32_t count, uint64_t desc) {
     std::vector<Vertex> out;
     const uint16_t a = DescAttributes(desc);
     const uint32_t stride = DescStride(desc);
     if (count == 0 || stride == 0 || !r.Has(static_cast<std::size_t>(count) * stride)) return out;
+    // The attributes must fit the declared stride, or the last record reads past the block.
+    if (VertexBytesSSE(a) > stride) {
+        r.failed = true;
+        return out;
+    }
 
     out.resize(count);
     for (auto& v : out) {
@@ -196,11 +213,6 @@ std::vector<Vertex> ReadVerticesSSE(Reader& r, uint32_t count, uint64_t desc) {
         }
         if (a & kEyeData) o += 4;
 
-        if (o > stride) {
-            r.failed = true;
-            out.clear();
-            return out;
-        }
         r.Skip(stride);
     }
     return out;

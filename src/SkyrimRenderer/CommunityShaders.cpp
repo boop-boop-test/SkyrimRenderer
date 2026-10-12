@@ -99,7 +99,9 @@ void Reflect(LightingPixelShader& ps) {
 } // namespace
 
 bool Install::HasFeature(std::string_view name) const {
-    return std::ranges::any_of(features, [&](const std::string& f) { return _stricmp(f.c_str(), name.data()) == 0; });
+    return std::ranges::any_of(features, [&](const std::string& f) {
+        return f.size() == name.size() && _strnicmp(f.data(), name.data(), name.size()) == 0;
+    });
 }
 
 const Install& Detect() {

@@ -184,9 +184,10 @@ void MeshRenderer::DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& me
 
     // Community Shaders path: same skinning, morphs and raster state as above,
     // CS's own pixel shader and the user's CS settings.
-    if (useCommunityShaders_ && CSRenderPath::Get().Handles(mesh)) {
+    // Falls through to the native draw when CS can't draw it (e.g. no bridge VS).
+    if (useCommunityShaders_ && CSRenderPath::Get().Handles(mesh) &&
         CSRenderPath::Get().Draw(ctx, mesh, useGPUSkinning, shader_.GetInputLayout(useGPUSkinning),
-                                 shader_.GetSamplerState());
+                                 shader_.GetSamplerState())) {
         shader_.RestoreAfterForeignDraw(ctx);
         return;
     }

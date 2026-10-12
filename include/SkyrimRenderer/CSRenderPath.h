@@ -61,7 +61,9 @@ public:
     /// Draws `mesh` with CS's shader. Leaves the native pipeline's VS-stage
     /// buffers (camera, bones, morphs) in place; the caller restores its own
     /// shaders afterwards. `gpuSkinned` selects the skinned bridge VS.
-    void Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool gpuSkinned,
+    /// Returns false, with no state touched, when the shader or bridge VS is
+    /// unavailable; the caller then draws natively.
+    bool Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool gpuSkinned,
               ID3D11InputLayout* layout, ID3D11SamplerState* sampler);
 
 private:
