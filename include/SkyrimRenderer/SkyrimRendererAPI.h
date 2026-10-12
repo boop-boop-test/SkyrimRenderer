@@ -131,6 +131,12 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetBuildVersion(void);
 
 // --- Lifecycle -------------------------------------------------------------
 
+// One DLL serves every mod in the process. The callbacks, the Present hook
+// and Shutdown are process-wide: a single composite consumer (DressCode) owns
+// them. Other mods use texture mode (SetSceneTextureMode / RenderToTexture /
+// GetSceneTexture), set no callbacks and never call Shutdown; they destroy
+// only their own scenes. Per-consumer callbacks and shutdown are planned.
+
 // Hook IDXGISwapChain::Present for frame-synced rendering and backbuffer
 // compositing (SetCompositeRect / overlays). Only composite consumers need it;
 // texture-mode consumers must NOT call it. Call once after the DX11 device is
