@@ -186,14 +186,14 @@ static bool LoadDDSTexture(const std::string& texturePath, ID3D11Device* device,
 }
 
 // ============================================================================
-// Helper: Apply skeleton pose transforms to vertices (Outfit Studio "pose" mode)
+// Helper: Apply skeleton pose transforms to vertices (bind pose -> skeleton pose)
 // ============================================================================
 //
 // For head parts (eyes, mouth, brows), vertices are stored in skin space but
 // need skeleton bone transforms to be positioned correctly in world space.
 // Body/armor meshes are already in world space and don't need this.
 //
-// The pipeline per vertex (from Outfit Studio's GetAllPoseTransforms):
+// Standard linear-blend skinning; per vertex:
 //   skin coords → [skinToBone] → bone coords → [boneGlobal] → global coords → [globalToSkin] → skin coords
 //
 // For our renderer we want world-space output, so we skip the final globalToSkin:

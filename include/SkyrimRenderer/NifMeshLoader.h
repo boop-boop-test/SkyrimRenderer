@@ -237,7 +237,7 @@ void ApplyMorphs(std::vector<PreviewVertex>& vertices, const MorphData& morphDat
 /// @param device        D3D11 device for buffer creation
 /// @param outMeshes     Receives the loaded mesh data
 /// @param skeletonPath  Optional skeleton NIF path. When provided, applies CPU skinning
-///                      using skeleton bone transforms (Outfit Studio "pose" mode).
+///                      using the skeleton's bone transforms.
 ///                      Required for head parts (eyes, mouth, brows) which store vertices
 ///                      in local bone space rather than world space.
 /// @param morphs        Optional per-shape morph data. Key = NIF shape name.

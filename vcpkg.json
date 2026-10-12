@@ -3,7 +3,7 @@
     "name": "skyrim-renderer",
     "version-string": "1.0.0",
     "description": "Standalone offscreen 3D renderer for Skyrim NIF meshes.",
-    "license": "Apache-2.0",
+    "license": "MIT",
     "dependencies": [
         "directxmath",
         "directxtk",

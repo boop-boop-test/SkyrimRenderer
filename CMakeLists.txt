@@ -182,4 +182,11 @@ if(PROJECT_IS_TOP_LEVEL)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
             "${DIST_DIR}/Shaders/")
+
+    # Licence and third-party notices ship with every package
+    add_custom_command(TARGET skyrim-renderer-lib POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+            "${DIST_DIR}/")
 endif()
