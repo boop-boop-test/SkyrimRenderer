@@ -13,6 +13,14 @@
 .PARAMETER SkipZip
     Skip the final zip packaging step
 
+.PARAMETER SkipDeploy
+    Skip copying the plugin and shaders into the MO2 mod folder
+
+.PARAMETER DeployDir
+    MO2 mod folder to deploy into (e.g. ...\MODDING MO2\mods\SkyrimRenderer_main). Defaults to
+    $env:SKYRIMRENDERER_DEPLOY_DIR, then to $DeployDir set in BuildAndPackage.local.ps1 (gitignored)
+    next to this script. With none set, the deploy step is skipped.
+
 .EXAMPLE
     .\BuildAndPackage.ps1
     .\BuildAndPackage.ps1 -SkipZip
@@ -20,7 +28,9 @@
 
 param(
     [switch]$SkipCpp,
-    [switch]$SkipZip
+    [switch]$SkipZip,
+    [switch]$SkipDeploy,
+    [string]$DeployDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,7 +76,8 @@ function Invoke-MsvcCmd {
     try {
         if ($vcvars) {
             Write-Dim "vcvarsall: $vcvars"
-            $batContent = "@`"" + $vcvars + "`" x64 > nul 2>&1`r`n" +
+            # `call` is required: without it cmd hands control to vcvarsall.bat and never runs $Cmd.
+            $batContent = "@call `"" + $vcvars + "`" x64 > nul 2>&1`r`n" +
                           "@cd /d `"$WorkDir`"`r`n" +
                           $Cmd
         } else {
@@ -102,10 +113,10 @@ Write-Host "===============================================" -ForegroundColor Ma
 Write-Host "  SkyrimRenderer Build and Package"             -ForegroundColor Magenta
 Write-Host "===============================================" -ForegroundColor Magenta
 
-# -- [1/2] C++ Build ----------------------------------------------------------
+# -- [1/3] C++ Build ----------------------------------------------------------
 
 if (-not $SkipCpp) {
-    Write-Header "[1/2] C++ Release Build"
+    Write-Header "[1/3] C++ Release Build"
 
     $buildDir = Join-Path $ProjectDir "build\release-msvc"
     if (-not (Test-Path $buildDir)) {
@@ -116,7 +127,7 @@ if (-not $SkipCpp) {
     Invoke-MsvcCmd -Label "C++ Release build" `
         -Cmd "cmake --build build/release-msvc --config Release"
 } else {
-    Write-BuildWarn "[1/2] C++ build skipped"
+    Write-BuildWarn "[1/3] C++ build skipped"
 }
 
 # -- Copy shaders into distribution -------------------------------------------
@@ -133,17 +144,16 @@ if (Test-Path $shaderSrc) {
     Write-BuildWarn "Shaders directory not found: $shaderSrc"
 }
 
-# -- [2/2] Zip ----------------------------------------------------------------
+# -- [2/3] Zip ----------------------------------------------------------------
 
 if (-not $SkipZip) {
-    Write-Header "[2/2] Packaging Distribution"
+    Write-Header "[2/3] Packaging Distribution"
 
     $distDir = Join-Path $ProjectDir "contrib\Distribution"
     $outDir  = Join-Path $ProjectDir "contrib"
     $branch  = git -C $ProjectDir rev-parse --abbrev-ref HEAD 2>$null
     if (-not $branch) { $branch = "unknown" }
-    $stamp   = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-    $zipName = ("SkyrimRenderer_" + $branch + "_" + $stamp + ".zip") -replace '[/\\]', '-'
+    $zipName = ("SkyrimRenderer_" + $branch + ".zip") -replace '[/\\]', '-'
     $zipPath = Join-Path $outDir $zipName
 
     if (-not (Test-Path $distDir)) {
@@ -155,7 +165,41 @@ if (-not $SkipZip) {
     Compress-Archive -Path "$distDir\*" -DestinationPath $zipPath -CompressionLevel Optimal -Force
     Write-Ok "Archive created: $zipPath"
 } else {
-    Write-BuildWarn "[2/2] Zip skipped"
+    Write-BuildWarn "[2/3] Zip skipped"
+}
+
+# -- [3/3] Deploy to MO2 -------------------------------------------------------
+
+if (-not $SkipDeploy) {
+    Write-Header "[3/3] Deploying to MO2"
+
+    if (-not $DeployDir) { $DeployDir = $env:SKYRIMRENDERER_DEPLOY_DIR }
+    $localCfg = Join-Path $ProjectDir "BuildAndPackage.local.ps1"
+    if (-not $DeployDir -and (Test-Path $localCfg)) { . $localCfg }
+
+    if (-not $DeployDir) {
+        Write-BuildWarn "No deploy folder (pass -DeployDir, set SKYRIMRENDERER_DEPLOY_DIR or BuildAndPackage.local.ps1) - skipped"
+    } elseif (Get-Process -Name "SkyrimSE" -ErrorAction SilentlyContinue) {
+        Write-Err "SkyrimSE.exe is running (the DLL is loaded) - close the game and deploy again"
+        exit 1
+    } else {
+        $dll        = Join-Path $ProjectDir "contrib\Distribution\PluginRelease\SkyrimRenderer.dll"
+        $pluginsDir = Join-Path $DeployDir "SKSE\Plugins"
+        $shadersDst = Join-Path $pluginsDir "SkyrimRenderer\shaders"
+        if (-not (Test-Path $dll)) {
+            Write-Err "Plugin not built: $dll"
+            exit 1
+        }
+        New-Item -ItemType Directory -Force $pluginsDir | Out-Null
+        Copy-Item $dll $pluginsDir -Force
+        if (Test-Path $shadersDst) { Remove-Item $shadersDst -Recurse -Force }
+        New-Item -ItemType Directory -Force $shadersDst | Out-Null
+        Copy-Item (Join-Path $ProjectDir "contrib\Distribution\Shaders\*") $shadersDst -Recurse -Force
+        $ver = (Get-Item (Join-Path $pluginsDir "SkyrimRenderer.dll")).VersionInfo.FileVersion
+        Write-Ok "Deployed SkyrimRenderer $ver to $DeployDir"
+    }
+} else {
+    Write-BuildWarn "[3/3] Deploy skipped"
 }
 
 # -- Done ---------------------------------------------------------------------

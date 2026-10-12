@@ -1,60 +1,63 @@
 #include <RE/Skyrim.h>
 #include <RE/B/BSResourceNiBinaryStream.h>
+#include "SkyrimRenderer/GameFileReader.h"
 #include <SKSE/SKSE.h>
 
 #include "SkyrimRenderer/NifMeshLoader.h"
+#include "SkyrimRenderer/NifReader.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TriFileParser.h"
-
-#include <NifFile.hpp>
-#include <ExtraData.hpp>
-#include <Nodes.hpp>
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
 #include <chrono>
 #include <future>
 #include <cmath>
+#include <optional>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace SkyrimRenderer {
 
-// Zero-copy stream buffer — wraps an existing char buffer as a std::istream
-// without the allocation + copy that std::istringstream incurs.
-struct MemBuf : std::streambuf {
-    MemBuf(const char* base, size_t size) {
-        char* p = const_cast<char*>(base);
-        this->setg(p, p, p + size);
+// Parses a NIF read from the game's file system; logs why it failed.
+static std::optional<Nif::File> ParseNif(const std::string& fileData, const std::string& path) {
+    std::string error;
+    auto nif = Nif::File::Parse(reinterpret_cast<const uint8_t*>(fileData.data()), fileData.size(), &error);
+    if (!nif) {
+        SKSE::log::error("[NifMeshLoader] Could not parse NIF '{}': {}", path, error);
+        return std::nullopt;
     }
-};
+    for (const auto& warning : nif->Warnings()) {
+        SKSE::log::warn("[NifMeshLoader] '{}': {}", path, warning);
+    }
+    return nif;
+}
 
 // ============================================================================
 // Helper: Extract BODYTRI path from NIF's NiStringExtraData
 // ============================================================================
 
-static std::string GetBodyTriPath(nifly::NifFile& nif) {
-    auto& hdr = nif.GetHeader();
-
+static std::string GetBodyTriPath(const Nif::File& nif) {
     // Check root node first, then all shapes
-    std::vector<nifly::NiAVObject*> nodes;
-    if (auto* root = nif.GetRootNode()) {
+    std::vector<const Nif::AVObject*> nodes;
+    if (const auto* root = nif.GetNode(nif.Root())) {
         nodes.push_back(root);
     }
-    for (auto* shape : nif.GetShapes()) {
-        if (shape) nodes.push_back(shape);
+    for (const int32_t shape : nif.Shapes()) {
+        nodes.push_back(nif.GetShape(shape));
     }
 
-    for (auto* node : nodes) {
-        for (auto& edRef : node->extraDataRefs) {
-            auto* strData = hdr.GetBlock<nifly::NiStringExtraData>(edRef);
+    for (const auto* node : nodes) {
+        for (const int32_t edRef : node->extraData) {
+            const auto* strData = nif.GetStringExtraData(edRef);
             if (strData) {
-                std::string edName = strData->name.get();
+                std::string edName = strData->name;
                 // Case-insensitive check for "BODYTRI"
                 std::string upper = edName;
                 for (auto& c : upper) c = static_cast<char>(::toupper(c));
                 if (upper == "BODYTRI") {
-                    std::string triPath = strData->stringData.get();
+                    std::string triPath = strData->value;
                     if (!triPath.empty()) {
                         // Path is relative to Data\meshes\ — prepend meshes\ for BSResource
                         // Normalize separators
@@ -87,36 +90,8 @@ static std::string GetBodyTriPath(nifly::NifFile& nif) {
 // ============================================================================
 
 static bool ReadGameFile(const std::string& path, std::string& outData, size_t sizeHint = 0) {
-    RE::BSResourceNiBinaryStream stream(path.c_str());
-    if (!stream.good()) {
-        SKSE::log::warn("[NifMeshLoader] BSResourceNiBinaryStream failed to open: {}", path);
-        return false;
-    }
-
-    // Read file in chunks. NiBinaryStream::read returns bool (all bytes read).
-    // BufferInfo.totalSize is 0 for BSA-backed streams, so we can't pre-allocate exact size.
-    outData.clear();
-    if (sizeHint > 0) outData.reserve(sizeHint);
-    constexpr uint32_t kChunkSize = 65536;  // 64 KB — 16x fewer syscalls than 4 KB
-    char buf[kChunkSize];
-    while (stream.good()) {
-        uint32_t posBefore = stream.tell();
-        if (stream.read(buf, kChunkSize)) {
-            // Full chunk read
-            outData.append(buf, kChunkSize);
-        } else {
-            // Partial read or EOF — check how far we got
-            uint32_t posAfter = stream.tell();
-            uint32_t bytesRead = posAfter - posBefore;
-            if (bytesRead > 0 && bytesRead <= kChunkSize) {
-                outData.append(buf, bytesRead);
-            }
-            break;
-        }
-    }
-
-    if (outData.empty()) {
-        SKSE::log::warn("[NifMeshLoader] File was empty or unreadable: {}", path);
+    if (!SkyrimRenderer::ReadWholeGameFile(path.c_str(), outData, sizeHint)) {
+        SKSE::log::warn("[NifMeshLoader] Could not open or read: {}", path);
         return false;
     }
 
@@ -211,14 +186,14 @@ static bool LoadDDSTexture(const std::string& texturePath, ID3D11Device* device,
 }
 
 // ============================================================================
-// Helper: Apply skeleton pose transforms to vertices (Outfit Studio "pose" mode)
+// Helper: Apply skeleton pose transforms to vertices (bind pose -> skeleton pose)
 // ============================================================================
 //
 // For head parts (eyes, mouth, brows), vertices are stored in skin space but
 // need skeleton bone transforms to be positioned correctly in world space.
 // Body/armor meshes are already in world space and don't need this.
 //
-// The pipeline per vertex (from Outfit Studio's GetAllPoseTransforms):
+// Standard linear-blend skinning; per vertex:
 //   skin coords → [skinToBone] → bone coords → [boneGlobal] → global coords → [globalToSkin] → skin coords
 //
 // For our renderer we want world-space output, so we skip the final globalToSkin:
@@ -227,178 +202,168 @@ static bool LoadDDSTexture(const std::string& texturePath, ID3D11Device* device,
 // In bind pose, boneGlobal * skinToBone = inverseGlobalToSkin for all bones,
 // so this is equivalent to: worldPos = inverseGlobalToSkin * vertex
 
-static void ApplySkeletonPose(nifly::NifFile& meshNif, nifly::NiShape* shape,
-                              nifly::NifFile& skelNif,
-                              std::vector<PreviewVertex>& vertices) {
-    if (!shape->HasSkinInstance()) return;
+/// Per-vertex bone weights of a skinned shape: inline in BSTriShape vertex
+/// data, or (older NiTriShape) the first four non-zero NiSkinData weights in
+/// bone order.
+static std::vector<SkinWeight> ShapeVertexWeights(const Nif::File& nif, const Nif::Shape& shape, size_t numBones) {
+    std::vector<SkinWeight> weights(shape.vertices.size());
+    if (!shape.legacy) {
+        for (size_t i = 0; i < shape.vertices.size(); ++i) {
+            for (int w = 0; w < 4; ++w) {
+                weights[i].boneIndices[w] = shape.vertices[i].bones[w];
+                weights[i].weights[w] = shape.vertices[i].weights[w];
+            }
+        }
+        return weights;
+    }
+    const auto* data = nif.SkinDataOf(shape);
+    if (!data) return weights;
+    for (size_t b = 0; b < numBones && b < data->bones.size(); ++b) {
+        for (const auto& [vertIdx, wt] : data->bones[b].weights) {
+            if (vertIdx >= weights.size() || wt <= 0.0f) continue;
+            auto& vw = weights[vertIdx];
+            for (int w = 0; w < 4; ++w) {
+                if (vw.weights[w] <= 0.0f) {
+                    vw.boneIndices[w] = static_cast<uint8_t>(b);
+                    vw.weights[w] = wt;
+                    break;
+                }
+            }
+        }
+    }
+    return weights;
+}
 
-    uint16_t numVerts = shape->GetNumVertices();
+/// skin -> bone transform of bone `b` (identity if the file has none).
+static BoneTransform SkinToBone(const Nif::File& nif, const Nif::Shape& shape, size_t b) {
+    const auto* data = nif.SkinDataOf(shape);
+    return data && b < data->bones.size() ? data->bones[b].skinToBone : BoneTransform{};
+}
+
+/// Global transform of the named node in `skel`, if it has one.
+static std::optional<BoneTransform> NodeGlobal(const Nif::File& skel, std::string_view name) {
+    const int32_t node = skel.FindNode(name);
+    if (node == Nif::kNoRef) return std::nullopt;
+    return skel.GlobalTransform(node);
+}
+
+static void ApplySkeletonPose(const Nif::File& meshNif, const Nif::Shape& shape, const Nif::File& skelNif,
+                              std::vector<PreviewVertex>& vertices) {
+    if (!meshNif.SkinOf(shape)) return;
+
+    const size_t numVerts = std::min(shape.vertices.size(), vertices.size());
     if (numVerts == 0) return;
 
     // Get bone list for this shape (works for both BSTriShape and NiTriShape)
-    std::vector<std::string> boneNames;
-    meshNif.GetShapeBoneList(shape, boneNames);
+    const std::vector<std::string> boneNames = meshNif.BoneNames(shape);
     if (boneNames.empty()) return;
 
     uint32_t numBones = static_cast<uint32_t>(boneNames.size());
 
-    // Get globalToSkin transform from the shape
-    nifly::MatTransform globalToSkin;
-    meshNif.GetShapeTransformGlobalToSkin(shape, globalToSkin);
-
     // For each bone: compose boneGlobal * skinToBone to get the per-bone vertex transform
     // This takes vertices from skin space → bone space → world space
-    std::vector<nifly::MatTransform> boneTransforms(numBones);
+    std::vector<BoneTransform> boneTransforms(numBones);
     uint32_t foundBones = 0;
 
     for (uint32_t b = 0; b < numBones; ++b) {
-        // Get skinToBone from the mesh's skin data
-        nifly::MatTransform skinToBone;
-        if (!meshNif.GetShapeTransformSkinToBone(shape, b, skinToBone)) {
-            skinToBone.Clear();
-        }
-
         // Get bone's global transform from the skeleton
-        nifly::MatTransform boneGlobal;
-        if (skelNif.GetNodeTransformToGlobal(boneNames[b], boneGlobal)) {
+        if (auto boneGlobal = NodeGlobal(skelNif, boneNames[b])) {
             // Compose: boneGlobal * skinToBone
-            boneTransforms[b] = boneGlobal.ComposeTransforms(skinToBone);
+            boneTransforms[b] = boneGlobal->Compose(SkinToBone(meshNif, shape, b));
             foundBones++;
         } else {
             // Bone not in skeleton — use identity (vertex stays in place)
-            boneTransforms[b].Clear();
+            boneTransforms[b] = BoneTransform{};
         }
     }
 
     if (foundBones == 0) {
-        SKSE::log::warn("[NifMeshLoader] No skeleton bones matched for shape '{}'", shape->name.get());
+        SKSE::log::warn("[NifMeshLoader] No skeleton bones matched for shape '{}'", shape.name);
         return;
     }
 
     // Log transform details for debugging
     for (uint32_t b = 0; b < numBones && b < 2; ++b) {
-        nifly::MatTransform skinToBoneDbg;
-        meshNif.GetShapeTransformSkinToBone(shape, b, skinToBoneDbg);
-        nifly::MatTransform boneGlobalDbg;
-        skelNif.GetNodeTransformToGlobal(boneNames[b], boneGlobalDbg);
+        const BoneTransform skinToBoneDbg = SkinToBone(meshNif, shape, b);
+        const BoneTransform boneGlobalDbg = NodeGlobal(skelNif, boneNames[b]).value_or(BoneTransform{});
         SKSE::log::info("[NifMeshLoader]   Bone[{}] '{}': boneGlobal=({:.1f},{:.1f},{:.1f}), skinToBone=({:.1f},{:.1f},{:.1f}), composed=({:.1f},{:.1f},{:.1f})",
                         b, boneNames[b],
-                        boneGlobalDbg.translation.x, boneGlobalDbg.translation.y, boneGlobalDbg.translation.z,
-                        skinToBoneDbg.translation.x, skinToBoneDbg.translation.y, skinToBoneDbg.translation.z,
-                        boneTransforms[b].translation.x, boneTransforms[b].translation.y, boneTransforms[b].translation.z);
+                        boneGlobalDbg.translation[0], boneGlobalDbg.translation[1], boneGlobalDbg.translation[2],
+                        skinToBoneDbg.translation[0], skinToBoneDbg.translation[1], skinToBoneDbg.translation[2],
+                        boneTransforms[b].translation[0], boneTransforms[b].translation[1], boneTransforms[b].translation[2]);
     }
 
-    // Pre-build per-vertex weight array (uniform format for both BSTriShape and NiTriShape)
-    struct VertWeight { uint8_t boneIdx[4]; float weight[4]; };
-    std::vector<VertWeight> vertWeights(numVerts, {{0,0,0,0}, {0.f,0.f,0.f,0.f}});
-
-    auto* bsTriShape = dynamic_cast<nifly::BSTriShape*>(shape);
-    if (bsTriShape) {
-        // BSTriShape: inline vertData
-        for (uint16_t i = 0; i < numVerts; ++i) {
-            const auto& vd = bsTriShape->vertData[i];
-            for (int w = 0; w < 4; ++w) {
-                vertWeights[i].boneIdx[w] = vd.weightBones[w];
-                vertWeights[i].weight[w] = vd.weights[w];
-            }
-        }
-    } else {
-        // NiTriShape: per-bone weight maps from NiSkinData
-        for (uint32_t b = 0; b < numBones; ++b) {
-            std::unordered_map<uint16_t, float> boneWeights;
-            meshNif.GetShapeBoneWeights(shape, b, boneWeights);
-            for (auto& [vertIdx, wt] : boneWeights) {
-                if (vertIdx >= numVerts || wt <= 0.0f) continue;
-                auto& vw = vertWeights[vertIdx];
-                for (int w = 0; w < 4; ++w) {
-                    if (vw.weight[w] <= 0.0f) {
-                        vw.boneIdx[w] = static_cast<uint8_t>(b);
-                        vw.weight[w] = wt;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // Per-vertex weights (uniform format for both BSTriShape and NiTriShape)
+    const std::vector<SkinWeight> vertWeights = ShapeVertexWeights(meshNif, shape, numBones);
 
     // Log first vertex before/after
-    if (numVerts > 0) {
-        SKSE::log::info("[NifMeshLoader]   Vertex[0] before: ({:.1f},{:.1f},{:.1f})",
-                        vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
-        SKSE::log::info("[NifMeshLoader]   Vertex[0] weights: [{:.3f},{:.3f},{:.3f},{:.3f}] bones: [{},{},{},{}]",
-                        vertWeights[0].weight[0], vertWeights[0].weight[1],
-                        vertWeights[0].weight[2], vertWeights[0].weight[3],
-                        vertWeights[0].boneIdx[0], vertWeights[0].boneIdx[1],
-                        vertWeights[0].boneIdx[2], vertWeights[0].boneIdx[3]);
-    }
+    SKSE::log::info("[NifMeshLoader]   Vertex[0] before: ({:.1f},{:.1f},{:.1f})",
+                    vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
+    SKSE::log::info("[NifMeshLoader]   Vertex[0] weights: [{:.3f},{:.3f},{:.3f},{:.3f}] bones: [{},{},{},{}]",
+                    vertWeights[0].weights[0], vertWeights[0].weights[1],
+                    vertWeights[0].weights[2], vertWeights[0].weights[3],
+                    vertWeights[0].boneIndices[0], vertWeights[0].boneIndices[1],
+                    vertWeights[0].boneIndices[2], vertWeights[0].boneIndices[3]);
 
     // Apply per-vertex weighted bone transforms
     // Reads positions/normals from already-populated vertices array (works for both formats)
-    for (uint16_t i = 0; i < numVerts; ++i) {
-        nifly::Vector3 origPos(vertices[i].position[0], vertices[i].position[1], vertices[i].position[2]);
-        nifly::Vector3 origNormal(vertices[i].normal[0], vertices[i].normal[1], vertices[i].normal[2]);
-
-        nifly::Vector3 posedPos(0.0f, 0.0f, 0.0f);
-        nifly::Vector3 posedNormal(0.0f, 0.0f, 0.0f);
+    for (size_t i = 0; i < numVerts; ++i) {
+        float posedPos[3] = { 0.0f, 0.0f, 0.0f };
+        float posedNormal[3] = { 0.0f, 0.0f, 0.0f };
         float totalWeight = 0.0f;
 
         for (int w = 0; w < 4; ++w) {
-            float weight = vertWeights[i].weight[w];
+            float weight = vertWeights[i].weights[w];
             if (weight <= 0.0f) continue;
 
-            uint8_t bIdx = vertWeights[i].boneIdx[w];
+            uint8_t bIdx = vertWeights[i].boneIndices[w];
             if (bIdx >= numBones) continue;
 
-            nifly::Vector3 tPos = boneTransforms[bIdx].ApplyTransform(origPos);
-            nifly::Vector3 tNorm = boneTransforms[bIdx].ApplyTransformToDir(origNormal);
+            float tPos[3], tNorm[3];
+            boneTransforms[bIdx].TransformPoint(vertices[i].position, tPos);
+            boneTransforms[bIdx].TransformDirection(vertices[i].normal, tNorm);
 
-            posedPos.x += tPos.x * weight;
-            posedPos.y += tPos.y * weight;
-            posedPos.z += tPos.z * weight;
-
-            posedNormal.x += tNorm.x * weight;
-            posedNormal.y += tNorm.y * weight;
-            posedNormal.z += tNorm.z * weight;
-
+            for (int k = 0; k < 3; ++k) {
+                posedPos[k] += tPos[k] * weight;
+                posedNormal[k] += tNorm[k] * weight;
+            }
             totalWeight += weight;
         }
 
         // Single-bone shapes often don't store per-vertex weights (all zeros).
         // The game assumes 100% weight to bone 0. Apply bone 0 transform directly.
         if (totalWeight <= 0.001f && numBones > 0) {
-            posedPos = boneTransforms[0].ApplyTransform(origPos);
-            posedNormal = boneTransforms[0].ApplyTransformToDir(origNormal);
+            boneTransforms[0].TransformPoint(vertices[i].position, posedPos);
+            boneTransforms[0].TransformDirection(vertices[i].normal, posedNormal);
             totalWeight = 1.0f;
         }
 
         if (totalWeight > 0.001f) {
-            vertices[i].position[0] = posedPos.x;
-            vertices[i].position[1] = posedPos.y;
-            vertices[i].position[2] = posedPos.z;
+            vertices[i].position[0] = posedPos[0];
+            vertices[i].position[1] = posedPos[1];
+            vertices[i].position[2] = posedPos[2];
 
-            float nLen = sqrtf(posedNormal.x * posedNormal.x +
-                               posedNormal.y * posedNormal.y +
-                               posedNormal.z * posedNormal.z);
+            float nLen = sqrtf(posedNormal[0] * posedNormal[0] +
+                               posedNormal[1] * posedNormal[1] +
+                               posedNormal[2] * posedNormal[2]);
             if (nLen > 0.001f) {
-                vertices[i].normal[0] = posedNormal.x / nLen;
-                vertices[i].normal[1] = posedNormal.y / nLen;
-                vertices[i].normal[2] = posedNormal.z / nLen;
+                vertices[i].normal[0] = posedNormal[0] / nLen;
+                vertices[i].normal[1] = posedNormal[1] / nLen;
+                vertices[i].normal[2] = posedNormal[2] / nLen;
             }
         }
     }
 
     // Log first vertex after transform
-    if (numVerts > 0) {
-        SKSE::log::info("[NifMeshLoader]   Vertex[0] after: ({:.1f},{:.1f},{:.1f})",
-                        vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
-    }
+    SKSE::log::info("[NifMeshLoader]   Vertex[0] after: ({:.1f},{:.1f},{:.1f})",
+                    vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
 
     SKSE::log::info("[NifMeshLoader] Applied skeleton pose: {} bones ({} matched), {} vertices",
                     numBones, foundBones, numVerts);
 }
 
 // ============================================================================
-// LoadNifMeshes — Parse NIF with nifly, create D3D11 buffers
+// LoadNifMeshes — Parse NIF, create D3D11 buffers
 // ============================================================================
 
 // ============================================================================
@@ -452,10 +417,8 @@ bool ExtractSkeletonFromNif(const std::string& skeletonNifPath,
         return false;
     }
 
-    MemBuf mb(fileData.data(), fileData.size());
-    std::istream stream(&mb);
-    nifly::NifFile skelNif;
-    if (skelNif.Load(stream) != 0 || !skelNif.IsValid()) {
+    auto skelNif = ParseNif(fileData, skeletonNifPath);
+    if (!skelNif) {
         SKSE::log::warn("[NifMeshLoader] ExtractSkeletonFromNif: failed to parse '{}'", skeletonNifPath);
         return false;
     }
@@ -463,37 +426,24 @@ bool ExtractSkeletonFromNif(const std::string& skeletonNifPath,
     // Recursive lambda to walk the NIF node tree.
     // Builds a flat bone list with parent indices.
     struct Walker {
-        nifly::NifFile& nif;
+        const Nif::File& nif;
         SkeletonDef& skeleton;
 
-        void Walk(nifly::NiNode* node, int32_t parentIndex) {
+        void Walk(int32_t nodeIndex, int32_t parentIndex) {
+            const auto* node = nif.GetNode(nodeIndex);
             if (!node) return;
 
             uint32_t boneIndex = static_cast<uint32_t>(skeleton.bones.size());
             SkeletonDef::Bone bone;
-            bone.name = node->name.get();
+            bone.name = node->name;
             bone.parentIndex = parentIndex;
 
             // Get the node's local transform (relative to parent).
-            auto localXf = node->GetTransformToParent();
-            bone.localTransform.translation[0] = localXf.translation.x;
-            bone.localTransform.translation[1] = localXf.translation.y;
-            bone.localTransform.translation[2] = localXf.translation.z;
-            bone.localTransform.scale = localXf.scale;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    bone.localTransform.rotation.m[r][c] = localXf.rotation[r][c];
+            bone.localTransform = node->local;
 
             // Get the node's global transform (world space).
-            nifly::MatTransform globalXf;
-            if (nif.GetNodeTransformToGlobal(bone.name, globalXf)) {
-                bone.globalTransform.translation[0] = globalXf.translation.x;
-                bone.globalTransform.translation[1] = globalXf.translation.y;
-                bone.globalTransform.translation[2] = globalXf.translation.z;
-                bone.globalTransform.scale = globalXf.scale;
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        bone.globalTransform.rotation.m[r][c] = globalXf.rotation[r][c];
+            if (auto globalXf = NodeGlobal(nif, bone.name)) {
+                bone.globalTransform = *globalXf;
             } else {
                 // Fallback: compose parent global * local
                 if (parentIndex >= 0) {
@@ -507,22 +457,15 @@ bool ExtractSkeletonFromNif(const std::string& skeletonNifPath,
             skeleton.bones.push_back(std::move(bone));
             skeleton.boneNameToIndex[skeleton.bones.back().name] = boneIndex;
 
-            // Recurse into children
-            auto& hdr = nif.GetHeader();
-            for (auto& childRef : node->childRefs) {
-                auto* childNode = hdr.GetBlock<nifly::NiNode>(childRef);
-                if (childNode) {
-                    Walk(childNode, static_cast<int32_t>(boneIndex));
-                }
+            // Recurse into child nodes
+            for (const int32_t child : node->children) {
+                Walk(child, static_cast<int32_t>(boneIndex));
             }
         }
     };
 
-    Walker walker{skelNif, outSkeleton};
-    auto* root = skelNif.GetRootNode();
-    if (root) {
-        walker.Walk(root, -1);
-    }
+    Walker walker{*skelNif, outSkeleton};
+    walker.Walk(skelNif->Root(), -1);
 
     SKSE::log::info("[NifMeshLoader] ExtractSkeletonFromNif: '{}' — {} bones",
                     skeletonNifPath, outSkeleton.bones.size());
@@ -541,36 +484,30 @@ uint32_t MergeMeshBonesIntoSkeleton(const std::string& meshNifPath,
     std::string fileData;
     if (!ReadGameFile(meshNifPath, fileData, 256 * 1024)) return 0;
 
-    MemBuf mb2(fileData.data(), fileData.size());
-    std::istream stream(&mb2);
-    nifly::NifFile meshNif;
-    if (meshNif.Load(stream) != 0 || !meshNif.IsValid()) return 0;
+    auto meshNif = ParseNif(fileData, meshNifPath);
+    if (!meshNif) return 0;
 
     // Walk the mesh NIF's node tree and find bones not in the skeleton.
     // For each new bone, find its parent (which may already be in skeleton
     // from either the main skeleton.nif or a previous mesh merge).
     uint32_t merged = 0;
-    auto* root = meshNif.GetRootNode();
-    if (!root) return 0;
+    if (!meshNif->GetNode(meshNif->Root())) return 0;
 
     // Recursive walker — parent-first order ensures parents are added before children.
     struct Walker {
-        nifly::NifFile& nif;
+        const Nif::File& nif;
         SkeletonDef& skel;
         uint32_t& count;
 
-        void Walk(nifly::NiNode* node, const std::string& parentName) {
+        void Walk(int32_t nodeIndex, const std::string& parentName) {
+            const auto* node = nif.GetNode(nodeIndex);
             if (!node) return;
-            std::string boneName = node->name.get();
+            std::string boneName = node->name;
 
             // Skip if already in skeleton
             if (skel.boneNameToIndex.count(boneName)) {
                 // Still recurse — children might be new
-                auto& hdr = nif.GetHeader();
-                for (auto& childRef : node->childRefs) {
-                    auto* child = hdr.GetBlock<nifly::NiNode>(childRef);
-                    if (child) Walk(child, boneName);
-                }
+                for (const int32_t child : node->children) Walk(child, boneName);
                 return;
             }
 
@@ -588,25 +525,11 @@ uint32_t MergeMeshBonesIntoSkeleton(const std::string& meshNifPath,
             bone.name = boneName;
             bone.parentIndex = parentIndex;
 
-            auto localXf = node->GetTransformToParent();
-            bone.localTransform.translation[0] = localXf.translation.x;
-            bone.localTransform.translation[1] = localXf.translation.y;
-            bone.localTransform.translation[2] = localXf.translation.z;
-            bone.localTransform.scale = localXf.scale;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    bone.localTransform.rotation.m[r][c] = localXf.rotation[r][c];
+            bone.localTransform = node->local;
 
-            // Global transform: try nifly first, then compose from parent
-            nifly::MatTransform globalXf;
-            if (nif.GetNodeTransformToGlobal(boneName, globalXf)) {
-                bone.globalTransform.translation[0] = globalXf.translation.x;
-                bone.globalTransform.translation[1] = globalXf.translation.y;
-                bone.globalTransform.translation[2] = globalXf.translation.z;
-                bone.globalTransform.scale = globalXf.scale;
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        bone.globalTransform.rotation.m[r][c] = globalXf.rotation[r][c];
+            // Global transform: from the mesh's own node tree, else composed from parent
+            if (auto globalXf = NodeGlobal(nif, boneName)) {
+                bone.globalTransform = *globalXf;
             } else if (parentIndex >= 0) {
                 bone.globalTransform = skel.bones[parentIndex].globalTransform
                                            .Compose(bone.localTransform);
@@ -619,17 +542,13 @@ uint32_t MergeMeshBonesIntoSkeleton(const std::string& meshNifPath,
             skel.bones.push_back(std::move(bone));
             count++;
 
-            // Recurse into children
-            auto& hdr = nif.GetHeader();
-            for (auto& childRef : node->childRefs) {
-                auto* child = hdr.GetBlock<nifly::NiNode>(childRef);
-                if (child) Walk(child, boneName);
-            }
+            // Recurse into child nodes
+            for (const int32_t child : node->children) Walk(child, boneName);
         }
     };
 
-    Walker walker{meshNif, skeleton, merged};
-    walker.Walk(root, "");
+    Walker walker{*meshNif, skeleton, merged};
+    walker.Walk(meshNif->Root(), "");
 
     return merged;
 }
@@ -732,80 +651,35 @@ void ApplySkinPose(const MeshSkinData& skinData,
 }
 
 // ============================================================================
-// Helper: Extract MeshSkinData from a nifly NiShape (BSTriShape or NiTriShape)
+// Helper: Extract MeshSkinData from a shape (BSTriShape or NiTriShape)
 // ============================================================================
 
-static void ExtractSkinDataFromShape(nifly::NifFile& meshNif, nifly::NiShape* shape,
+static void ExtractSkinDataFromShape(const Nif::File& meshNif, const Nif::Shape& shape,
                                       MeshSkinData& outSkinData) {
     outSkinData = {};
-    if (!shape->HasSkinInstance()) return;
+    if (!meshNif.SkinOf(shape)) return;
 
-    outSkinData.shapeName = shape->name.get();
+    outSkinData.shapeName = shape.name;
 
     // Get bone list (works for both BSTriShape and NiTriShape)
-    meshNif.GetShapeBoneList(shape, outSkinData.boneNames);
+    outSkinData.boneNames = meshNif.BoneNames(shape);
     if (outSkinData.boneNames.empty()) return;
 
-    uint32_t numBones = static_cast<uint32_t>(outSkinData.boneNames.size());
-    uint16_t numVerts = shape->GetNumVertices();
+    const size_t numBones = outSkinData.boneNames.size();
 
     // Get globalToSkin transform
-    nifly::MatTransform globalToSkin;
-    meshNif.GetShapeTransformGlobalToSkin(shape, globalToSkin);
-    outSkinData.globalToSkin.translation[0] = globalToSkin.translation.x;
-    outSkinData.globalToSkin.translation[1] = globalToSkin.translation.y;
-    outSkinData.globalToSkin.translation[2] = globalToSkin.translation.z;
-    outSkinData.globalToSkin.scale = globalToSkin.scale;
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            outSkinData.globalToSkin.rotation.m[r][c] = globalToSkin.rotation[r][c];
+    if (const auto* data = meshNif.SkinDataOf(shape)) {
+        outSkinData.globalToSkin = data->skinTransform;
+    }
 
     // Get per-bone skinToBone transforms
     outSkinData.skinToBone.resize(numBones);
-    for (uint32_t b = 0; b < numBones; ++b) {
-        nifly::MatTransform skinToBone;
-        if (meshNif.GetShapeTransformSkinToBone(shape, b, skinToBone)) {
-            outSkinData.skinToBone[b].translation[0] = skinToBone.translation.x;
-            outSkinData.skinToBone[b].translation[1] = skinToBone.translation.y;
-            outSkinData.skinToBone[b].translation[2] = skinToBone.translation.z;
-            outSkinData.skinToBone[b].scale = skinToBone.scale;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    outSkinData.skinToBone[b].rotation.m[r][c] = skinToBone.rotation[r][c];
-        }
+    for (size_t b = 0; b < numBones; ++b) {
+        outSkinData.skinToBone[b] = SkinToBone(meshNif, shape, b);
     }
 
     // Get per-vertex bone weights
-    outSkinData.vertexWeights.resize(numVerts);
-    auto* bsTriShape = dynamic_cast<nifly::BSTriShape*>(shape);
-    if (bsTriShape) {
-        // Fast path: BSTriShape stores weights inline in vertData
-        for (uint16_t i = 0; i < numVerts; ++i) {
-            const auto& vd = bsTriShape->vertData[i];
-            for (int w = 0; w < 4; ++w) {
-                outSkinData.vertexWeights[i].boneIndices[w] = vd.weightBones[w];
-                outSkinData.vertexWeights[i].weights[w] = vd.weights[w];
-            }
-        }
-    } else {
-        // Generic path: NiTriShape stores weights in NiSkinData (per-bone maps)
-        for (uint32_t b = 0; b < numBones; ++b) {
-            std::unordered_map<uint16_t, float> boneWeights;
-            meshNif.GetShapeBoneWeights(shape, b, boneWeights);
-            for (auto& [vertIdx, weight] : boneWeights) {
-                if (vertIdx >= numVerts || weight <= 0.0f) continue;
-                auto& vw = outSkinData.vertexWeights[vertIdx];
-                // Find first empty slot (weight == 0)
-                for (int w = 0; w < 4; ++w) {
-                    if (vw.weights[w] <= 0.0f) {
-                        vw.boneIndices[w] = static_cast<uint8_t>(b);
-                        vw.weights[w] = weight;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    outSkinData.vertexWeights = ShapeVertexWeights(meshNif, shape, numBones);
 }
 
 // ============================================================================
@@ -840,63 +714,25 @@ static bool LoadWeight0Shapes(const std::string& path0,
     std::string fileData;
     if (!ReadGameFile(path0, fileData, 256 * 1024)) return false;
 
-    MemBuf mb0(fileData.data(), fileData.size());
-    std::istream stream(&mb0);
-    nifly::NifFile nif0;
-    if (nif0.Load(stream) != 0 || !nif0.IsValid()) return false;
+    auto nif0 = ParseNif(fileData, path0);
+    if (!nif0) return false;
 
-    auto shapes = nif0.GetShapes();
-    outShapes.reserve(shapes.size());
+    outShapes.reserve(nif0->Shapes().size());
 
-    for (auto* shape : shapes) {
-        if (!shape) continue;
+    for (const int32_t shapeIndex : nif0->Shapes()) {
+        const auto& shape = *nif0->GetShape(shapeIndex);
+        const size_t numVerts = shape.vertices.size();
+        if (numVerts == 0) continue;
 
         Weight0ShapeData data;
-        data.name = shape->name.get();
-
-        auto* bsTriShape = dynamic_cast<nifly::BSTriShape*>(shape);
-        if (bsTriShape) {
-            uint16_t numVerts = bsTriShape->GetNumVertices();
-            if (numVerts == 0) continue;
-            data.positions.resize(numVerts * 3);
-            data.normals.resize(numVerts * 3);
-            for (uint16_t i = 0; i < numVerts; ++i) {
-                const auto& vd = bsTriShape->vertData[i];
-                data.positions[i * 3 + 0] = vd.vert.x;
-                data.positions[i * 3 + 1] = vd.vert.y;
-                data.positions[i * 3 + 2] = vd.vert.z;
-                if (bsTriShape->HasNormals()) {
-                    data.normals[i * 3 + 0] = (vd.normal[0] / 255.0f) * 2.0f - 1.0f;
-                    data.normals[i * 3 + 1] = (vd.normal[1] / 255.0f) * 2.0f - 1.0f;
-                    data.normals[i * 3 + 2] = (vd.normal[2] / 255.0f) * 2.0f - 1.0f;
-                } else {
-                    data.normals[i * 3 + 0] = 0.0f;
-                    data.normals[i * 3 + 1] = 0.0f;
-                    data.normals[i * 3 + 2] = 1.0f;
-                }
-            }
-        } else {
-            auto* geomData = nif0.GetGeometryData(shape);
-            if (!geomData) continue;
-            uint16_t numVerts = geomData->GetNumVertices();
-            if (numVerts == 0) continue;
-            data.positions.resize(numVerts * 3);
-            data.normals.resize(numVerts * 3);
-            for (uint16_t i = 0; i < numVerts; ++i) {
-                if (i < geomData->vertices.size()) {
-                    data.positions[i * 3 + 0] = geomData->vertices[i].x;
-                    data.positions[i * 3 + 1] = geomData->vertices[i].y;
-                    data.positions[i * 3 + 2] = geomData->vertices[i].z;
-                }
-                if (geomData->HasNormals() && i < geomData->normals.size()) {
-                    data.normals[i * 3 + 0] = geomData->normals[i].x;
-                    data.normals[i * 3 + 1] = geomData->normals[i].y;
-                    data.normals[i * 3 + 2] = geomData->normals[i].z;
-                } else {
-                    data.normals[i * 3 + 0] = 0.0f;
-                    data.normals[i * 3 + 1] = 0.0f;
-                    data.normals[i * 3 + 2] = 1.0f;
-                }
+        data.name = shape.name;
+        data.positions.resize(numVerts * 3);
+        data.normals.resize(numVerts * 3);
+        for (size_t i = 0; i < numVerts; ++i) {
+            const auto& v = shape.vertices[i];
+            for (int k = 0; k < 3; ++k) {
+                data.positions[i * 3 + k] = v.position[k];
+                data.normals[i * 3 + k] = shape.hasNormals ? v.normal[k] : (k == 2 ? 1.0f : 0.0f);
             }
         }
 
@@ -927,33 +763,19 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
     auto perfAfterRead = std::chrono::steady_clock::now();
     auto nifReadMs = std::chrono::duration_cast<std::chrono::milliseconds>(perfAfterRead - perfSection).count();
 
-    // Parse with nifly (zero-copy stream to avoid istringstream allocation + memcpy)
     perfSection = std::chrono::steady_clock::now();
-    MemBuf nifBuf(fileData.data(), fileData.size());
-    std::istream dataStream(&nifBuf);
-    nifly::NifFile nif;
-    int loadResult = nif.Load(dataStream);
-    if (loadResult != 0) {
-        SKSE::log::error("[NifMeshLoader] nifly failed to parse NIF (error {}): {}", loadResult, meshPath);
-        return false;
-    }
-
-    if (!nif.IsValid()) {
-        SKSE::log::error("[NifMeshLoader] nifly loaded but NIF is invalid: {}", meshPath);
-        return false;
-    }
+    auto parsed = ParseNif(fileData, meshPath);
+    if (!parsed) return false;
+    const Nif::File& nif = *parsed;
 
     // Load skeleton NIF if provided (for CPU skinning / pose transforms)
-    std::unique_ptr<nifly::NifFile> skelNif;
+    std::optional<Nif::File> skelNif;
     if (!skeletonPath.empty()) {
         std::string skelData;
         if (ReadGameFile(skeletonPath, skelData, 128 * 1024)) {
-            skelNif = std::make_unique<nifly::NifFile>();
-            MemBuf skelBuf(skelData.data(), skelData.size());
-            std::istream skelStream(&skelBuf);
-            if (skelNif->Load(skelStream) != 0 || !skelNif->IsValid()) {
+            skelNif = ParseNif(skelData, skeletonPath);
+            if (!skelNif) {
                 SKSE::log::warn("[NifMeshLoader] Failed to parse skeleton NIF: {}", skeletonPath);
-                skelNif.reset();
             } else {
                 SKSE::log::info("[NifMeshLoader] Loaded skeleton for pose transforms: {}", skeletonPath);
             }
@@ -961,7 +783,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
     }
 
     // Get all shapes from the NIF
-    auto shapes = nif.GetShapes();
+    const auto& shapes = nif.Shapes();
     if (shapes.empty()) {
         SKSE::log::warn("[NifMeshLoader] NIF has no shapes: {}", meshPath);
         return false;
@@ -971,8 +793,8 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
     // with alpha blend enabled purely for the engine's runtime fade (distance LOD).
     // We should treat blend-only shapes as Opaque in that case.
     bool rootIsBSFadeNode = false;
-    if (auto* root = nif.GetRootNode()) {
-        rootIsBSFadeNode = (dynamic_cast<nifly::BSFadeNode*>(root) != nullptr);
+    if (const auto* root = nif.GetNode(nif.Root())) {
+        rootIsBSFadeNode = root->type == "BSFadeNode";
     }
 
     auto perfAfterParse = std::chrono::steady_clock::now();
@@ -1019,18 +841,25 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
     auto perfShapesStart = std::chrono::steady_clock::now();
     uint32_t loadedCount = 0;
 
-    for (auto* shape : shapes) {
-        if (!shape) continue;
+    for (const int32_t shapeIndex : shapes) {
+        const Nif::Shape& shape = *nif.GetShape(shapeIndex);
 
         // Skip collision/invisible shapes — no shader means not renderable
-        auto* shader = nif.GetShader(shape);
+        const auto* shader = nif.GetShader(shape.shaderProperty);
         if (!shader) {
-            SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (no shader)", shape->name.get());
+            SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (no shader)", shape.name);
+            continue;
+        }
+        // BSEffectShaderProperty shapes are glows, auras and gradient shells
+        // drawn by the game's unlit effect shader; there is no preview
+        // equivalent, and as a lit material they cover the item in a solid shell.
+        if (!shader->lighting) {
+            SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (effect shader)", shape.name);
             continue;
         }
 
         // Skip shapes with names that indicate non-visual geometry
-        std::string shapeName = shape->name.get();
+        std::string shapeName = shape.name;
         {
             std::string lower = shapeName;
             for (auto& c : lower) c = static_cast<char>(::tolower(c));
@@ -1044,186 +873,84 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             }
         }
 
-        // Try as BSTriShape first (SSE format)
-        auto* bsTriShape = dynamic_cast<nifly::BSTriShape*>(shape);
+        // Texture slot `i` of this shape's shader as a game path ("" if unset).
+        auto textureSlot = [&](size_t i) {
+            return i < shader->textures.size() ? Nif::GameTexturePath(shader->textures[i]) : std::string{};
+        };
 
         std::vector<PreviewVertex> vertices;
         std::vector<uint16_t> indices;
 
         // Get diffuse texture path for this shape
-        std::string diffuseTexPath;
-        nif.GetTextureSlot(shape, diffuseTexPath, 0);
+        std::string diffuseTexPath = textureSlot(0);
 
-        if (bsTriShape) {
-            // BSTriShape — vertex data is in vertData array
-            uint16_t numVerts = bsTriShape->GetNumVertices();
-            if (numVerts == 0) {
-                SKSE::log::warn("[NifMeshLoader] Shape '{}' has 0 vertices, skipping", shape->name.get());
-                continue;
+        const size_t numVerts = shape.vertices.size();
+        if (numVerts == 0) {
+            SKSE::log::warn("[NifMeshLoader] Shape '{}' has 0 vertices, skipping", shape.name);
+            continue;
+        }
+
+        // BSTriShape (SSE) and NiTriShape/NiTriStrips (older) arrive in the same
+        // form; vertices are in bind pose (skin space). CPU skinning is only
+        // needed later for posing/animation.
+        vertices.resize(numVerts);
+        for (size_t i = 0; i < numVerts; ++i) {
+            const auto& src = shape.vertices[i];
+            auto& dst = vertices[i];
+            std::copy_n(src.position, 3, dst.position);
+
+            if (shape.hasNormals) {
+                std::copy_n(src.normal, 3, dst.normal);
+            } else {
+                dst.normal[0] = 0.0f;
+                dst.normal[1] = 0.0f;
+                dst.normal[2] = 1.0f;
             }
 
-            vertices.resize(numVerts);
-
-            // Extract positions, normals, and UVs from BSVertexData
-            for (uint16_t i = 0; i < numVerts; ++i) {
-                const auto& vd = bsTriShape->vertData[i];
-                vertices[i].position[0] = vd.vert.x;
-                vertices[i].position[1] = vd.vert.y;
-                vertices[i].position[2] = vd.vert.z;
-
-                if (bsTriShape->HasNormals()) {
-                    // Normals are stored as unsigned bytes [0,255] -> [-1,1]
-                    vertices[i].normal[0] = (vd.normal[0] / 255.0f) * 2.0f - 1.0f;
-                    vertices[i].normal[1] = (vd.normal[1] / 255.0f) * 2.0f - 1.0f;
-                    vertices[i].normal[2] = (vd.normal[2] / 255.0f) * 2.0f - 1.0f;
-                } else {
-                    vertices[i].normal[0] = 0.0f;
-                    vertices[i].normal[1] = 0.0f;
-                    vertices[i].normal[2] = 1.0f;
-                }
-
-                // UV coordinates from BSVertexData
-                if (bsTriShape->HasUVs()) {
-                    vertices[i].uv[0] = vd.uv.u;
-                    vertices[i].uv[1] = vd.uv.v;
-                } else {
-                    vertices[i].uv[0] = 0.0f;
-                    vertices[i].uv[1] = 0.0f;
-                }
-
-                // Vertex colors (hair uses Y channel for tint mask)
-                if (bsTriShape->HasVertexColors()) {
-                    vertices[i].color[0] = vd.colorData[0] / 255.0f;
-                    vertices[i].color[1] = vd.colorData[1] / 255.0f;
-                    vertices[i].color[2] = vd.colorData[2] / 255.0f;
-                    vertices[i].color[3] = vd.colorData[3] / 255.0f;
-                } else {
-                    vertices[i].color[0] = 1.0f;
-                    vertices[i].color[1] = 1.0f;
-                    vertices[i].color[2] = 1.0f;
-                    vertices[i].color[3] = 1.0f;
-                }
-
-                // Tangent data (for tangent-space normal mapping).
-                // BSVertexData stores tangent as unsigned bytes and bitangent split across
-                // bitangentX (float), bitangentY (byte), bitangentZ (byte).
-                if (bsTriShape->HasTangents()) {
-                    vertices[i].tangent[0] = (vd.tangent[0] / 255.0f) * 2.0f - 1.0f;
-                    vertices[i].tangent[1] = (vd.tangent[1] / 255.0f) * 2.0f - 1.0f;
-                    vertices[i].tangent[2] = (vd.tangent[2] / 255.0f) * 2.0f - 1.0f;
-                    // Compute bitangent sign from the NIF's actual bitangent
-                    float bx = vd.bitangentX;
-                    float by = (vd.bitangentY / 255.0f) * 2.0f - 1.0f;
-                    float bz = (vd.bitangentZ / 255.0f) * 2.0f - 1.0f;
-                    float tx = vertices[i].tangent[0], ty = vertices[i].tangent[1], tz = vertices[i].tangent[2];
-                    float nx = vertices[i].normal[0], ny = vertices[i].normal[1], nz = vertices[i].normal[2];
-                    // cross(N, T) gives the canonical bitangent; sign = dot(canonical, actual)
-                    float cx = ny*tz - nz*ty;
-                    float cy = nz*tx - nx*tz;
-                    float cz = nx*ty - ny*tx;
-                    vertices[i].tangent[3] = (cx*bx + cy*by + cz*bz) >= 0.0f ? 1.0f : -1.0f;
-                } else {
-                    vertices[i].tangent[0] = 0.0f;
-                    vertices[i].tangent[1] = 0.0f;
-                    vertices[i].tangent[2] = 0.0f;
-                    vertices[i].tangent[3] = 1.0f;
-                }
+            // UV coordinates
+            if (shape.hasUVs) {
+                dst.uv[0] = src.uv[0];
+                dst.uv[1] = src.uv[1];
+            } else {
+                dst.uv[0] = 0.0f;
+                dst.uv[1] = 0.0f;
             }
 
-            // SSE BSTriShape vertices are already in bind pose (skin space).
-            // CPU skinning is only needed later for posing/animation.
-            // Raw vertData[].vert positions are correct for static preview.
-
-            // Get triangles
-            std::vector<nifly::Triangle> tris;
-            bsTriShape->GetTriangles(tris);
-            indices.reserve(tris.size() * 3);
-            for (const auto& tri : tris) {
-                indices.push_back(tri.p1);
-                indices.push_back(tri.p2);
-                indices.push_back(tri.p3);
-            }
-        } else {
-            // Old-style NiTriShape with separate NiTriShapeData
-            auto* geomData = nif.GetGeometryData(shape);
-            if (!geomData) {
-                SKSE::log::warn("[NifMeshLoader] Shape '{}' has no geometry data, skipping", shape->name.get());
-                continue;
+            // Vertex colors (hair uses Y channel for tint mask)
+            if (shape.hasColors) {
+                std::copy_n(src.color, 4, dst.color);
+            } else {
+                dst.color[0] = 1.0f;
+                dst.color[1] = 1.0f;
+                dst.color[2] = 1.0f;
+                dst.color[3] = 1.0f;
             }
 
-            uint16_t numVerts = geomData->GetNumVertices();
-            if (numVerts == 0) continue;
-
-            vertices.resize(numVerts);
-
-            for (uint16_t i = 0; i < numVerts; ++i) {
-                if (i < geomData->vertices.size()) {
-                    vertices[i].position[0] = geomData->vertices[i].x;
-                    vertices[i].position[1] = geomData->vertices[i].y;
-                    vertices[i].position[2] = geomData->vertices[i].z;
-                }
-                if (geomData->HasNormals() && i < geomData->normals.size()) {
-                    vertices[i].normal[0] = geomData->normals[i].x;
-                    vertices[i].normal[1] = geomData->normals[i].y;
-                    vertices[i].normal[2] = geomData->normals[i].z;
-                } else {
-                    vertices[i].normal[0] = 0.0f;
-                    vertices[i].normal[1] = 0.0f;
-                    vertices[i].normal[2] = 1.0f;
-                }
-
-                // UV coordinates from NiGeometryData
-                if (geomData->HasUVs() && !geomData->uvSets.empty() && i < geomData->uvSets[0].size()) {
-                    vertices[i].uv[0] = geomData->uvSets[0][i].u;
-                    vertices[i].uv[1] = geomData->uvSets[0][i].v;
-                } else {
-                    vertices[i].uv[0] = 0.0f;
-                    vertices[i].uv[1] = 0.0f;
-                }
-
-                // Tangent data from NiTriShapeData
-                if (geomData->HasTangents() && i < geomData->tangents.size() && i < geomData->bitangents.size()) {
-                    vertices[i].tangent[0] = geomData->tangents[i].x;
-                    vertices[i].tangent[1] = geomData->tangents[i].y;
-                    vertices[i].tangent[2] = geomData->tangents[i].z;
-                    // Compute bitangent sign
-                    auto& T = geomData->tangents[i];
-                    auto& N = geomData->normals[i];
-                    auto& B = geomData->bitangents[i];
-                    float cx = N.y*T.z - N.z*T.y;
-                    float cy = N.z*T.x - N.x*T.z;
-                    float cz = N.x*T.y - N.y*T.x;
-                    vertices[i].tangent[3] = (cx*B.x + cy*B.y + cz*B.z) >= 0.0f ? 1.0f : -1.0f;
-                } else {
-                    vertices[i].tangent[0] = 0.0f;
-                    vertices[i].tangent[1] = 0.0f;
-                    vertices[i].tangent[2] = 0.0f;
-                    vertices[i].tangent[3] = 1.0f;
-                }
-
-                // Vertex colors from NiGeometryData
-                if (geomData->HasVertexColors() && i < geomData->vertexColors.size()) {
-                    auto& c = geomData->vertexColors[i];
-                    vertices[i].color[0] = c.r;
-                    vertices[i].color[1] = c.g;
-                    vertices[i].color[2] = c.b;
-                    vertices[i].color[3] = c.a;
-                } else {
-                    vertices[i].color[0] = 1.0f;
-                    vertices[i].color[1] = 1.0f;
-                    vertices[i].color[2] = 1.0f;
-                    vertices[i].color[3] = 1.0f;
-                }
+            // Tangent data (for tangent-space normal mapping), with the bitangent
+            // reduced to a handedness sign.
+            if (shape.hasTangents) {
+                std::copy_n(src.tangent, 3, dst.tangent);
+                const float* T = src.tangent;
+                const float* N = dst.normal;
+                const float* B = src.bitangent;
+                // cross(N, T) gives the canonical bitangent; sign = dot(canonical, actual)
+                const float cx = N[1] * T[2] - N[2] * T[1];
+                const float cy = N[2] * T[0] - N[0] * T[2];
+                const float cz = N[0] * T[1] - N[1] * T[0];
+                dst.tangent[3] = (cx * B[0] + cy * B[1] + cz * B[2]) >= 0.0f ? 1.0f : -1.0f;
+            } else {
+                dst.tangent[0] = 0.0f;
+                dst.tangent[1] = 0.0f;
+                dst.tangent[2] = 0.0f;
+                dst.tangent[3] = 1.0f;
             }
+        }
 
-            std::vector<nifly::Triangle> tris;
-            geomData->GetTriangles(tris);
-            indices.reserve(tris.size() * 3);
-            for (const auto& tri : tris) {
-                indices.push_back(tri.p1);
-                indices.push_back(tri.p2);
-                indices.push_back(tri.p3);
-            }
+        indices.reserve(shape.triangles.size() * 3);
+        for (const auto& tri : shape.triangles) {
+            indices.push_back(tri[0]);
+            indices.push_back(tri[1]);
+            indices.push_back(tri[2]);
         }
 
         // ── Dismemberment partition filtering ─────────────────────────────
@@ -1234,10 +961,14 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         //   30-61: SBP_30_HEAD .. SBP_61_FX01 → biped slot bit = partID - 30
         //   130-150: SBP_130_HEAD .. SBP_150_DECAPITATEDHEAD → same as 30-50
         //   0-13, 101-113, 201+: gore/caps, not biped slots → never filtered
-        if (partitionFilter != 0 && !indices.empty()) {
-            nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
-            std::vector<int> triParts;
-            if (nif.GetShapePartitions(shape, partInfo, triParts) && !triParts.empty()) {
+        // Only a BSDismemberSkinInstance has body-part IDs; a plain NiSkinInstance
+        // (e.g. vanilla FaceGen eyes, brows and mouth) is never filtered.
+        const auto* skinInstance = nif.SkinOf(shape);
+        const bool hasDismemberParts = skinInstance && skinInstance->dismember;
+        if (partitionFilter != 0 && !indices.empty() && hasDismemberParts) {
+            const auto& partInfo = skinInstance->parts;
+            const auto& triParts = shape.trianglePartitions;
+            if (!triParts.empty()) {
                 // Convert partID to biped slot bit index (0-31), or -1 if not a biped slot
                 auto partIDToSlotBit = [](uint16_t partID) -> int {
                     if (partID >= 30 && partID <= 61) return static_cast<int>(partID - 30);
@@ -1252,7 +983,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                     bool keep = true;
                     if (t < triParts.size() && triParts[t] >= 0 &&
                         triParts[t] < static_cast<int>(partInfo.size())) {
-                        uint16_t partID = partInfo[triParts[t]].partID;
+                        uint16_t partID = partInfo[triParts[t]].part;
                         int slotBit = partIDToSlotBit(partID);
                         if (slotBit >= 0 && (partitionFilter & (1u << slotBit))) {
                             keep = false;
@@ -1276,7 +1007,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             if (!vertices.empty() && partitionFilter != 0) {
                 SKSE::log::info("[NifMeshLoader] Shape '{}' fully filtered by partition mask", shapeName);
             } else {
-                SKSE::log::warn("[NifMeshLoader] Shape '{}' produced no vertex/index data", shape->name.get());
+                SKSE::log::warn("[NifMeshLoader] Shape '{}' produced no vertex/index data", shape.name);
             }
             continue;
         }
@@ -1404,14 +1135,13 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         // Skinned shapes: per-vertex weighted bone transforms (eyes, etc.)
         // Unskinned shapes: compose NIF node hierarchy transform with skeleton head bone
         if (skelNif) {
-            bool isSkinned = shape->HasSkinInstance();
-            SKSE::log::info("[NifMeshLoader] Shape '{}': skinned={}, bsTriShape={}",
-                            shape->name.get(), isSkinned, bsTriShape != nullptr);
+            const bool isSkinned = skinInstance != nullptr;
+            SKSE::log::info("[NifMeshLoader] Shape '{}': skinned={}, legacy={}",
+                            shape.name, isSkinned, shape.legacy);
 
             if (isSkinned) {
                 // Log bone names for debugging
-                std::vector<std::string> boneNames;
-                nif.GetShapeBoneList(shape, boneNames);
+                const std::vector<std::string> boneNames = nif.BoneNames(shape);
                 std::string boneList;
                 for (size_t bi = 0; bi < boneNames.size() && bi < 5; ++bi) {
                     if (bi > 0) boneList += ", ";
@@ -1425,74 +1155,52 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 // Unskinned head part — compose:
                 // 1. Shape's own transform within its NIF (node hierarchy)
                 // 2. Skeleton head bone global transform (places NIF root at head position)
-                nifly::MatTransform shapeGlobal = shape->GetTransformToParent();
-
-                // Walk up the NIF's node hierarchy to get shape's global-in-NIF transform
-                auto* parentNode = nif.GetParentNode(shape);
-                while (parentNode) {
-                    shapeGlobal = parentNode->GetTransformToParent().ComposeTransforms(shapeGlobal);
-                    parentNode = nif.GetParentNode(parentNode);
-                }
+                const BoneTransform shapeGlobal = nif.GlobalTransform(shapeIndex);
 
                 // Compose with skeleton head bone to get world position
-                nifly::MatTransform headBoneGlobal;
-                nifly::MatTransform worldTransform;
-                if (skelNif->GetNodeTransformToGlobal("NPC Head [Head]", headBoneGlobal)) {
-                    worldTransform = headBoneGlobal.ComposeTransforms(shapeGlobal);
-                } else {
-                    worldTransform = shapeGlobal;
-                }
+                const auto headBoneGlobal = NodeGlobal(*skelNif, "NPC Head [Head]");
+                const BoneTransform worldTransform = headBoneGlobal ? headBoneGlobal->Compose(shapeGlobal) : shapeGlobal;
 
                 // Apply to all vertices
                 for (auto& v : vertices) {
-                    nifly::Vector3 pos(v.position[0], v.position[1], v.position[2]);
-                    nifly::Vector3 norm(v.normal[0], v.normal[1], v.normal[2]);
-                    pos = worldTransform.ApplyTransform(pos);
-                    norm = worldTransform.ApplyTransformToDir(norm);
-                    v.position[0] = pos.x; v.position[1] = pos.y; v.position[2] = pos.z;
-                    v.normal[0] = norm.x; v.normal[1] = norm.y; v.normal[2] = norm.z;
+                    float pos[3], norm[3];
+                    worldTransform.TransformPoint(v.position, pos);
+                    worldTransform.TransformDirection(v.normal, norm);
+                    std::copy_n(pos, 3, v.position);
+                    std::copy_n(norm, 3, v.normal);
                 }
 
+                const BoneTransform head = headBoneGlobal.value_or(BoneTransform{});
                 SKSE::log::info("[NifMeshLoader] Applied NIF hierarchy + head bone transform to unskinned shape '{}' "
                                 "(shapeLocal: ({:.1f},{:.1f},{:.1f}), headBone: ({:.1f},{:.1f},{:.1f}))",
-                                shape->name.get(),
-                                shape->GetTransformToParent().translation.x,
-                                shape->GetTransformToParent().translation.y,
-                                shape->GetTransformToParent().translation.z,
-                                headBoneGlobal.translation.x,
-                                headBoneGlobal.translation.y,
-                                headBoneGlobal.translation.z);
+                                shape.name,
+                                shape.local.translation[0], shape.local.translation[1], shape.local.translation[2],
+                                head.translation[0], head.translation[1], head.translation[2]);
             }
         } else {
             // No skeleton — apply BSFadeNode / node hierarchy transform.
             // Body, armor, and hair NIFs may have a non-identity root transform
             // (common in modded meshes). Walk from shape up to root and apply.
-            nifly::MatTransform shapeWorld = shape->GetTransformToParent();
-            auto* parentNode = nif.GetParentNode(shape);
-            while (parentNode) {
-                shapeWorld = parentNode->GetTransformToParent().ComposeTransforms(shapeWorld);
-                parentNode = nif.GetParentNode(parentNode);
-            }
+            const BoneTransform shapeWorld = nif.GlobalTransform(shapeIndex);
 
             // Only apply if non-identity (skip the common case)
             bool isIdentity = (std::abs(shapeWorld.scale - 1.0f) < 1e-4f &&
-                               std::abs(shapeWorld.translation.x) < 1e-4f &&
-                               std::abs(shapeWorld.translation.y) < 1e-4f &&
-                               std::abs(shapeWorld.translation.z) < 1e-4f);
+                               std::abs(shapeWorld.translation[0]) < 1e-4f &&
+                               std::abs(shapeWorld.translation[1]) < 1e-4f &&
+                               std::abs(shapeWorld.translation[2]) < 1e-4f);
             if (!isIdentity) {
                 for (auto& v : vertices) {
-                    nifly::Vector3 pos(v.position[0], v.position[1], v.position[2]);
-                    nifly::Vector3 norm(v.normal[0], v.normal[1], v.normal[2]);
-                    pos = shapeWorld.ApplyTransform(pos);
-                    norm = shapeWorld.ApplyTransformToDir(norm);
-                    v.position[0] = pos.x; v.position[1] = pos.y; v.position[2] = pos.z;
-                    v.normal[0] = norm.x; v.normal[1] = norm.y; v.normal[2] = norm.z;
+                    float pos[3], norm[3];
+                    shapeWorld.TransformPoint(v.position, pos);
+                    shapeWorld.TransformDirection(v.normal, norm);
+                    std::copy_n(pos, 3, v.position);
+                    std::copy_n(norm, 3, v.normal);
                 }
                 SKSE::log::info("[NifMeshLoader] Applied BSFadeNode hierarchy transform to shape '{}' "
                                 "(scale={:.3f}, translate=({:.1f},{:.1f},{:.1f}))",
-                                shape->name.get(), shapeWorld.scale,
-                                shapeWorld.translation.x, shapeWorld.translation.y,
-                                shapeWorld.translation.z);
+                                shape.name, shapeWorld.scale,
+                                shapeWorld.translation[0], shapeWorld.translation[1],
+                                shapeWorld.translation[2]);
             }
         }
 
@@ -1503,7 +1211,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         // Verify vertex data at GPU buffer creation point
         if (!vertices.empty() && skelNif) {
             SKSE::log::info("[NifMeshLoader] GPU buffer creation - shape '{}' vertex[0]=({:.1f},{:.1f},{:.1f})",
-                            shape->name.get(), vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
+                            shape.name, vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
         }
 
         // Skin data and bind-pose vertices were captured before skeleton posing above.
@@ -1521,7 +1229,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         HRESULT hr = device->CreateBuffer(&vbDesc, &vbData, mesh.vertexBuffer.ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
             SKSE::log::error("[NifMeshLoader] CreateBuffer (VB) failed for '{}': 0x{:X}",
-                             shape->name.get(), static_cast<uint32_t>(hr));
+                             shape.name, static_cast<uint32_t>(hr));
             continue;
         }
 
@@ -1537,7 +1245,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         hr = device->CreateBuffer(&ibDesc, &ibData, mesh.indexBuffer.ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
             SKSE::log::error("[NifMeshLoader] CreateBuffer (IB) failed for '{}': 0x{:X}",
-                             shape->name.get(), static_cast<uint32_t>(hr));
+                             shape.name, static_cast<uint32_t>(hr));
             continue;
         }
 
@@ -1566,15 +1274,14 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             mesh.diffuseTexturePath = diffuseTexPath;
         }
 
-        std::string normalTexPath, slot2TexPath, detailTexPath, cubemapTexPath, envMaskTexPath, slot6TexPath, specTexPath, backlightTexPath;
-        nif.GetTextureSlot(shape, normalTexPath, 1);      // slot 1: normal (MSN)
-        nif.GetTextureSlot(shape, slot2TexPath, 2);        // slot 2: meaning depends on shader type
-        nif.GetTextureSlot(shape, detailTexPath, 3);       // slot 3: FaceGen detail map
-        nif.GetTextureSlot(shape, cubemapTexPath, 4);      // slot 4: environment cubemap (_e.dds)
-        nif.GetTextureSlot(shape, envMaskTexPath, 5);      // slot 5: environment mask (_m/_em)
-        nif.GetTextureSlot(shape, slot6TexPath, 6);        // slot 6: FaceGen tint (type 4) or multilayer inner (unused)
-        nif.GetTextureSlot(shape, specTexPath, 7);         // slot 7: specular (_S)
-        nif.GetTextureSlot(shape, backlightTexPath, 9);    // slot 9: back-light mask
+        std::string normalTexPath = textureSlot(1);     // slot 1: normal (MSN)
+        std::string slot2TexPath = textureSlot(2);      // slot 2: meaning depends on shader type
+        std::string detailTexPath = textureSlot(3);     // slot 3: FaceGen detail map
+        std::string cubemapTexPath = textureSlot(4);    // slot 4: environment cubemap (_e.dds)
+        std::string envMaskTexPath = textureSlot(5);    // slot 5: environment mask (_m/_em)
+        std::string slot6TexPath = textureSlot(6);      // slot 6: FaceGen tint (type 4) or multilayer inner (unused)
+        std::string specTexPath = textureSlot(7);       // slot 7: specular (_S)
+        std::string backlightTexPath = textureSlot(9);  // slot 9: back-light mask
 
         auto getSlotMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - texSlotStart).count();
@@ -1630,7 +1337,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             else if (job.path == normalTexPath)               mesh.normalSRV = srv;
             else if (job.path == slot2TexPath)                mesh.skSRV = srv;
             else if (job.path == detailTexPath)               mesh.detailSRV = srv;
-            else if (job.path == cubemapTexPath && job.srgb)  mesh.cubemapSRV = srv;
+            else if (job.path == cubemapTexPath && job.srgb)  { mesh.cubemapSRV = srv; mesh.cubemapTexturePath = cubemapTexPath; }
             else if (job.path == envMaskTexPath)              mesh.envMaskSRV = srv;
             else if (job.path == slot6TexPath)                mesh.tintSRV = srv;
             else if (job.path == specTexPath)                 mesh.specularSRV = srv;
@@ -1645,10 +1352,12 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         // Slots 2 and 6 have shader-type-dependent meaning.
         // Defer loading until after shader type is determined below.
 
-        mesh.name = shape->name.get();
+        mesh.name = shape.name;
+        mesh.shapeLocal = shape.local;
         mesh.vertexCount = static_cast<uint32_t>(vertices.size());
         mesh.indexCount = static_cast<uint32_t>(indices.size());
         mesh.vertexStride = kPreviewVertexStride;
+        mesh.indices = indices;
 
         // Store TRI morph targets in the mesh for later GPU morph buffer creation.
         if (nifTriLoaded) {
@@ -1669,7 +1378,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
 
         // Read shader type and flags from BSLightingShaderProperty
         if (shader) {
-            uint32_t shaderType = shader->GetShaderType();
+            uint32_t shaderType = shader->shaderType;
 
             // Map BSLightingShader feature type to ShadingModel
             // (matches BSShaderMaterial::Feature enum in CommonLibSSE-NG)
@@ -1682,41 +1391,33 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 default: mesh.shadingModel = ShadingModel::Default;    break;
             }
 
-            auto* lsShader = dynamic_cast<nifly::BSLightingShaderProperty*>(shader);
-            if (lsShader) {
-                mesh.specularStrength = lsShader->specularStrength;
-                mesh.specularGlossiness = lsShader->glossiness;
+            if (shader->lighting) {
+                mesh.specularStrength = shader->specularStrength;
+                mesh.specularGlossiness = shader->glossiness;
 
                 // Lighting Effect 1 & 2 (soft lighting rolloff, rim light power).
-                // In Skyrim SE NIFs (stream >= 130), nifly stores these at the same binary
-                // position as grayscaleToPaletteScale / fresnelPower. The LE-era fields
-                // (softlighting / rimlightPower) are NOT populated for SE NIFs.
-                mesh.softLightingRolloff = lsShader->GetGrayscaleToPaletteScale();
-                mesh.rimLightPower = lsShader->GetFresnelPower();
+                mesh.softLightingRolloff = shader->lightingEffect1;
+                mesh.rimLightPower = shader->lightingEffect2;
 
                 // Specular color from shader property
-                mesh.specularColorRGB[0] = lsShader->specularColor.x;
-                mesh.specularColorRGB[1] = lsShader->specularColor.y;
-                mesh.specularColorRGB[2] = lsShader->specularColor.z;
+                std::copy_n(shader->specularColor, 3, mesh.specularColorRGB);
 
-                // Back lighting scale
-                mesh.backlightScale = lsShader->backlightPower;
+                // Back lighting scale (not stored in Skyrim NIFs)
+                mesh.backlightScale = 0.0f;
 
                 // Material alpha (vanilla MaterialData.z)
-                mesh.materialAlpha = lsShader->alpha;
+                mesh.materialAlpha = shader->alpha;
 
                 // Environment map scale (controls cubemap reflection intensity)
-                mesh.environmentMapScale = lsShader->GetEnvironmentMapScale();
+                mesh.environmentMapScale = shader->environmentMapScale;
 
                 // Hair tint color baked into the NIF (FaceGen export / NPC replacers)
                 if (mesh.shadingModel == ShadingModel::HairTint) {
-                    mesh.tintColor[0] = lsShader->hairTintColor.x;
-                    mesh.tintColor[1] = lsShader->hairTintColor.y;
-                    mesh.tintColor[2] = lsShader->hairTintColor.z;
+                    std::copy_n(shader->hairTintColor, 3, mesh.tintColor);
                 }
 
-                uint32_t sf1 = lsShader->shaderFlags1;
-                uint32_t sf2 = lsShader->shaderFlags2;
+                uint32_t sf1 = shader->flags1;
+                uint32_t sf2 = shader->flags2;
 
                 // Bit positions from references/SkyrimShaderFlags.h
                 if (sf1 & (1 << 0))  mesh.shaderFlags |= ShaderFlags::Specular;          // SLSF1_SPECULAR
@@ -1731,14 +1432,14 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 if (sf2 & (1 << 27)) mesh.shaderFlags |= ShaderFlags::BackLighting;      // SLSF2_BACK_LIGHTING
 
                 SKSE::log::info("[NifMeshLoader] Shape '{}' shader: type={} sf1=0x{:08X} sf2=0x{:08X} -> flags=0x{:X}",
-                                shape->name.get(), lsShader->GetShaderType(),
+                                shape.name, shader->shaderType,
                                 sf1, sf2, static_cast<uint32_t>(mesh.shaderFlags));
             }
         }
 
         // Detect alpha mode from NiAlphaProperty
         // flags bit 0 = alpha blending, bit 9 = alpha test
-        auto* alphaProp = nif.GetAlphaProperty(shape);
+        const auto* alphaProp = nif.GetAlpha(shape.alphaProperty);
         if (alphaProp) {
             bool alphaBlend = (alphaProp->flags & (1 << 0)) != 0;
             bool alphaTest = (alphaProp->flags & (1 << 9)) != 0;
@@ -1764,7 +1465,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             }
 
             SKSE::log::info("[NifMeshLoader] Shape '{}' alpha: flags=0x{:X}, blend={}, test={}, threshold={}, mode={}",
-                            shape->name.get(), alphaProp->flags, alphaBlend, alphaTest, alphaProp->threshold,
+                            shape.name, alphaProp->flags, alphaBlend, alphaTest, alphaProp->threshold,
                             static_cast<uint8_t>(mesh.alphaMode));
         }
 
@@ -1779,7 +1480,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             HasFlag(mesh.shaderFlags, ShaderFlags::Decal)) {
             mesh.alphaCutoff = std::max(mesh.alphaCutoff, 0.016f);
             SKSE::log::info("[NifMeshLoader] Shape '{}': DEPTH_WRITE_DECALS cutoff={:.3f} flags=0x{:X}",
-                            shape->name.get(), mesh.alphaCutoff,
+                            shape.name, mesh.alphaCutoff,
                             static_cast<uint32_t>(mesh.shaderFlags));
         }
 
@@ -1818,9 +1519,9 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
         loadedCount++;
 
         SKSE::log::info("[NifMeshLoader] Loaded shape '{}': {} verts, {} indices, tex='{}', skinned={}",
-                        shape->name.get(), mesh.vertexCount, mesh.indexCount,
+                        shape.name, mesh.vertexCount, mesh.indexCount,
                         diffuseTexPath.empty() ? "(none)" : diffuseTexPath,
-                        shape->HasSkinInstance() ? "yes" : "no");
+                        skinInstance ? "yes" : "no");
     }
 
     auto shapesMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1830,7 +1531,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
 
     SKSE::log::info("[SkyrimRenderer::Perf] LoadNifMeshes '{}': {}ms total", meshPath, totalMs);
     SKSE::log::info("[SkyrimRenderer::Perf]   NIF read: {}ms ({}KB)", nifReadMs, fileData.size() / 1024);
-    SKSE::log::info("[SkyrimRenderer::Perf]   nifly parse: {}ms", nifParseMs);
+    SKSE::log::info("[SkyrimRenderer::Perf]   NIF parse: {}ms", nifParseMs);
     SKSE::log::info("[SkyrimRenderer::Perf]   TRI load: {}ms", triLoadMs);
     SKSE::log::info("[SkyrimRenderer::Perf]   Weight0 load: {}ms", weight0Ms);
     SKSE::log::info("[SkyrimRenderer::Perf]   Shapes+textures: {}ms ({} shapes)", shapesMs, loadedCount);

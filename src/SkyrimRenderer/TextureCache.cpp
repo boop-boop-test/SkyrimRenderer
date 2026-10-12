@@ -1,5 +1,6 @@
 #include <RE/Skyrim.h>
 #include <RE/B/BSResourceNiBinaryStream.h>
+#include "SkyrimRenderer/GameFileReader.h"
 #include <SKSE/SKSE.h>
 
 #include "SkyrimRenderer/TextureCache.h"
@@ -65,31 +66,7 @@ static std::string NormalizeTexturePath(const std::string& rawPath) {
 }
 
 static bool ReadGameFile(const std::string& path, std::string& outData, size_t sizeHint = 0) {
-    RE::BSResourceNiBinaryStream stream(path.c_str());
-    if (!stream.good()) {
-        return false;
-    }
-
-    outData.clear();
-    if (sizeHint > 0) outData.reserve(sizeHint);
-
-    constexpr uint32_t kChunkSize = 65536;  // 64 KB — 16x faster than 4 KB chunks
-    char buf[kChunkSize];
-    while (stream.good()) {
-        uint32_t posBefore = stream.tell();
-        if (stream.read(buf, kChunkSize)) {
-            outData.append(buf, kChunkSize);
-        } else {
-            uint32_t posAfter = stream.tell();
-            uint32_t bytesRead = posAfter - posBefore;
-            if (bytesRead > 0 && bytesRead <= kChunkSize) {
-                outData.append(buf, bytesRead);
-            }
-            break;
-        }
-    }
-
-    return !outData.empty();
+    return SkyrimRenderer::ReadWholeGameFile(path.c_str(), outData, sizeHint);
 }
 
 // ============================================================================

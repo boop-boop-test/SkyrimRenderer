@@ -345,6 +345,17 @@ void ShaderPipeline::Bind(ID3D11DeviceContext* ctx) {
     ctx->PSSetSamplers(0, 1, samplers);
 }
 
+void ShaderPipeline::RestoreAfterForeignDraw(ID3D11DeviceContext* ctx) {
+    if (!ctx || !ready_) return;
+    ctx->VSSetShader(vs_.Get(), nullptr, 0);
+    ctx->PSSetShader(ps_.Get(), nullptr, 0);
+    ctx->IASetInputLayout(inputLayout_.Get());
+    ID3D11Buffer* psCbs[] = { perFrameCB_.Get(), perMeshCB_.Get() };
+    ctx->PSSetConstantBuffers(0, 2, psCbs);
+    ID3D11SamplerState* samplers[] = { samplerState_.Get() };
+    ctx->PSSetSamplers(0, 1, samplers);
+}
+
 void ShaderPipeline::BindSkinned(ID3D11DeviceContext* ctx) {
     if (!ctx || !skinnedVS_ || !skinnedInputLayout_) return;
     ctx->VSSetShader(skinnedVS_.Get(), nullptr, 0);

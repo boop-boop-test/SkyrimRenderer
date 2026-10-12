@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file NifMeshLoader.h
-/// @brief Loads NIF mesh data via nifly and creates D3D11 GPU buffers.
+/// @brief Loads NIF mesh data (via NifReader) and creates D3D11 GPU buffers.
 ///
 /// IMPORTANT: This header must only be included from files that have already
 /// included CommonLib headers (RE/Skyrim.h) BEFORE any Windows API headers.
@@ -140,6 +140,13 @@ struct LoadedMesh {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> backlightSRV; // slot 9: back-light mask     [linear]
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cubemapSRV;   // slot 4: environment cubemap [SRGB]
     std::string diffuseTexturePath;  // game-relative path for debugging
+    std::string cubemapTexturePath;  // slot 4 path (raw view for Community Shaders)
+
+    // Raw (non-sRGB) views of diffuse and cubemap for the Community Shaders
+    // path, which samples colour raw and does its own gamma handling. Created
+    // on first CS draw.
+    mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> csDiffuseSRV;
+    mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> csCubemapSRV;
 
     // Specular properties from shader
     float specularStrength = 1.0f;
@@ -180,9 +187,19 @@ struct LoadedMesh {
     /// Empty for unskinned meshes (no re-posing needed).
     std::vector<PreviewVertex> bindPoseVertices;
 
+    /// CPU copy of the (partition-filtered) index list that backs indexBuffer.
+    /// Needed to recompute normals when bind-pose positions are replaced
+    /// (player live-face patch); the GPU buffer is immutable.
+    std::vector<uint16_t> indices;
+
     /// Skinning data (bone weights, bone names, transforms).
     /// Empty if the mesh is not skinned.
     MeshSkinData skinData;
+
+    /// The shape's local transform as stored in its NIF (not applied to the
+    /// vertices: skinned shapes are placed by skinData). Reported to consumers
+    /// that drive vertices so they can check which frame the data is in.
+    BoneTransform shapeLocal;
 
     /// Whether this mesh uses a dynamic D3D11 vertex buffer (for animation).
     /// Static meshes use D3D11_USAGE_IMMUTABLE; dynamic uses D3D11_USAGE_DYNAMIC.
@@ -220,7 +237,7 @@ void ApplyMorphs(std::vector<PreviewVertex>& vertices, const MorphData& morphDat
 /// @param device        D3D11 device for buffer creation
 /// @param outMeshes     Receives the loaded mesh data
 /// @param skeletonPath  Optional skeleton NIF path. When provided, applies CPU skinning
-///                      using skeleton bone transforms (Outfit Studio "pose" mode).
+///                      using the skeleton's bone transforms.
 ///                      Required for head parts (eyes, mouth, brows) which store vertices
 ///                      in local bone space rather than world space.
 /// @param morphs        Optional per-shape morph data. Key = NIF shape name.

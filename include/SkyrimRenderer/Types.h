@@ -68,7 +68,9 @@ enum class LightingPreset {
 enum class CameraPreset {
     FullBody,    // Full body view
     UpperBody,   // Waist up
-    Face         // Close-up on face
+    Face,        // Close-up on face
+    HeadShot,    // Portrait: head and neck fill the frame (fits the face mesh)
+    FaceClose    // Portrait: brows to chin fill the frame; HeadShot without eyes / mouth / face
 };
 
 /// ENB rendering mode
@@ -121,7 +123,8 @@ enum class Result {
     ExportFailed,
     InvalidParameter,
     NotInitialized,
-    OutOfMemory
+    OutOfMemory,
+    DeviceLost        // The D3D11 device was removed; rendering is off for the session
 };
 
 inline bool Succeeded(Result r) { return r == Result::Success; }

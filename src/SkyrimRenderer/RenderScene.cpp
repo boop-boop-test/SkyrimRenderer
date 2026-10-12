@@ -1,5 +1,6 @@
 #include "SkyrimRenderer/RenderScene.h"
 #include "SkyrimRenderer/DX11StateGuard.h"
+#include "SkyrimRenderer/CSRenderPath.h"
 #include "SkyrimRenderer/NifMeshLoader.h"
 #include "SkyrimRenderer/TextureCache.h"
 
@@ -117,6 +118,9 @@ RenderScene::RenderScene(uint32_t width, uint32_t height, const std::filesystem:
 
     meshRenderer_ = std::make_unique<MeshRenderer>(shader_);
 
+    // Community Shaders path (process-wide; no-op unless opted in and CS present)
+    CSRenderPath::Get().Initialize(device_, shaderDir);
+
     SKSE::log::info("[SkyrimRenderer] RenderScene created ({}x{})", width, height);
 }
 
@@ -138,7 +142,7 @@ RenderScene::~RenderScene() {
     renderTarget_.Release();
     shader_.Release();
     meshRenderer_.reset();
-    niflyMeshes_.clear();
+    loadedMeshes_.clear();
     sceneRoot_ = nullptr;
 
     SKSE::log::info("[SkyrimRenderer] RenderScene destroyed");
@@ -162,7 +166,7 @@ RenderScene::RenderScene(RenderScene&& other) noexcept {
     ambient_ = other.ambient_;
     backgroundColor_ = other.backgroundColor_;
     enbMode_ = other.enbMode_;
-    niflyMeshes_ = std::move(other.niflyMeshes_);
+    loadedMeshes_ = std::move(other.loadedMeshes_);
     gpuSkinningPose_ = other.gpuSkinningPose_;
     other.gpuSkinningPose_ = nullptr;
 
@@ -203,7 +207,7 @@ RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
         ambient_ = other.ambient_;
         backgroundColor_ = other.backgroundColor_;
         enbMode_ = other.enbMode_;
-        niflyMeshes_ = std::move(other.niflyMeshes_);
+        loadedMeshes_ = std::move(other.loadedMeshes_);
         gpuSkinningPose_ = other.gpuSkinningPose_;
         other.gpuSkinningPose_ = nullptr;
 
@@ -284,8 +288,8 @@ void RenderScene::SetFOV(float fovDegrees) {
 
 void RenderScene::SetCameraPreset(CameraPreset preset) {
     std::lock_guard lock(mutex_);
-    camera_.SetPreset(preset, niflyMeshes_, sceneRoot_.get(),
-                      hasHeadBone_ ? &headBonePos_ : nullptr);
+    camera_.SetPreset(preset, loadedMeshes_, sceneRoot_.get(),
+                      hasHeadBone_ ? &headBonePos_ : nullptr, gpuSkinningPose_);
 }
 
 float RenderScene::GetCameraYaw() const { return camera_.GetYaw(); }
@@ -498,7 +502,7 @@ void RenderScene::SetENBMode(ENBMode mode) {
 }
 
 // ============================================================================
-// Nifly Mesh Management
+// Mesh Management
 // ============================================================================
 
 uint32_t RenderScene::LoadNifMesh(const std::string& meshPath, MeshTag tag,
@@ -528,15 +532,15 @@ uint32_t RenderScene::LoadNifMesh(const std::string& meshPath, MeshTag tag,
                 if (m.shadingModel != ShadingModel::HairTint) {
                     m.tintColor[0] = m.tintColor[1] = m.tintColor[2] = 1.0f;
                 }
-                niflyMeshes_.push_back(std::move(m));
+                loadedMeshes_.push_back(std::move(m));
             }
-            camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+            camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
             geometryDirty_ = true;
             return count;
         }
     }
 
-    // Cache miss (or morphs active) — load from disk via nifly
+    // Cache miss (or morphs active) — load from disk
     std::vector<LoadedMesh> newMeshes;
     if (!LoadNifMeshes(meshPath, device_, newMeshes, skeletonPath, morphs, actorWeight)) {
         return 0;
@@ -562,20 +566,20 @@ uint32_t RenderScene::LoadNifMesh(const std::string& meshPath, MeshTag tag,
 
     for (auto& m : newMeshes) {
         m.tag = tag;
-        niflyMeshes_.push_back(std::move(m));
+        loadedMeshes_.push_back(std::move(m));
     }
 
     // Recompute orbit center and mark geometry dirty
-    camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+    camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
     geometryDirty_ = true;
 
     return count;
 }
 
 void RenderScene::ClearLoadedMeshes() {
-    niflyMeshes_.clear();
+    loadedMeshes_.clear();
     hasHeadBone_ = false;
-    camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+    camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
     geometryDirty_ = true;
 }
 
@@ -606,9 +610,9 @@ uint32_t RenderScene::LoadNifMeshGPUSkinned(const std::string& meshPath, MeshTag
                 if (m.shadingModel != ShadingModel::HairTint) {
                     m.tintColor[0] = m.tintColor[1] = m.tintColor[2] = 1.0f;
                 }
-                niflyMeshes_.push_back(std::move(m));
+                loadedMeshes_.push_back(std::move(m));
             }
-            camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+            camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
             geometryDirty_ = true;
             return count;
         }
@@ -629,10 +633,10 @@ uint32_t RenderScene::LoadNifMeshGPUSkinned(const std::string& meshPath, MeshTag
 
     for (auto& m : newMeshes) {
         m.tag = tag;
-        niflyMeshes_.push_back(std::move(m));
+        loadedMeshes_.push_back(std::move(m));
     }
 
-    camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+    camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
     geometryDirty_ = true;
 
     return count;
@@ -678,7 +682,7 @@ uint32_t RenderScene::LoadNifMeshBatch(std::vector<MeshLoadRequest>& requests) {
     }
 
     // Phase 2: Launch async loads for all cache misses concurrently.
-    // In release builds, nifly parse is fast (1-12ms) and texture I/O is
+    // In release builds, NIF parsing is fast (1-12ms) and texture I/O is
     // protected by per-key coalescing in TextureCache, so no throttling needed.
     struct AsyncJob {
         size_t resultIndex;
@@ -725,7 +729,7 @@ uint32_t RenderScene::LoadNifMeshBatch(std::vector<MeshLoadRequest>& requests) {
         auto& req = requests[i];
         auto& meshes = results[i].meshes;
 
-        req.meshStartIndex = static_cast<uint32_t>(niflyMeshes_.size());
+        req.meshStartIndex = static_cast<uint32_t>(loadedMeshes_.size());
         req.meshCount = 0;
 
         if (meshes.empty()) continue;
@@ -742,13 +746,13 @@ uint32_t RenderScene::LoadNifMeshBatch(std::vector<MeshLoadRequest>& requests) {
             if (m.shadingModel != ShadingModel::HairTint) {
                 m.tintColor[0] = m.tintColor[1] = m.tintColor[2] = 1.0f;
             }
-            niflyMeshes_.push_back(std::move(m));
+            loadedMeshes_.push_back(std::move(m));
         }
         req.meshCount = static_cast<uint32_t>(meshes.size());
         totalCount += req.meshCount;
     }
 
-    camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+    camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
     geometryDirty_ = true;
 
     auto elapsed = std::chrono::steady_clock::now() - startTime;
@@ -768,11 +772,11 @@ void RenderScene::SetGPUSkinningPose(const BonePoseMap* pose) {
 }
 
 void RenderScene::ClearMeshesByTag(MeshTag tag) {
-    niflyMeshes_.erase(
-        std::remove_if(niflyMeshes_.begin(), niflyMeshes_.end(),
+    loadedMeshes_.erase(
+        std::remove_if(loadedMeshes_.begin(), loadedMeshes_.end(),
                        [tag](const LoadedMesh& m) { return m.tag == tag; }),
-        niflyMeshes_.end());
-    camera_.UpdateOrbitCenter(niflyMeshes_, sceneRoot_.get());
+        loadedMeshes_.end());
+    camera_.UpdateOrbitCenter(loadedMeshes_, sceneRoot_.get());
     geometryDirty_ = true;
 }
 
@@ -781,16 +785,16 @@ void RenderScene::BuildMorphBuffers(const ActorMorphMap& morphs, ID3D11Device* d
 
     // Clear previous morph buffers and mesh references
     morphBuffers_.clear();
-    for (auto& mesh : niflyMeshes_) {
+    for (auto& mesh : loadedMeshes_) {
         mesh.morphDeltaSRV.Reset();
         mesh.morphVertexCount = 0;
     }
 
-    morphBuffers_.resize(niflyMeshes_.size());
+    morphBuffers_.resize(loadedMeshes_.size());
 
     uint32_t morphedCount = 0;
-    for (size_t i = 0; i < niflyMeshes_.size(); ++i) {
-        auto& mesh = niflyMeshes_[i];
+    for (size_t i = 0; i < loadedMeshes_.size(); ++i) {
+        auto& mesh = loadedMeshes_[i];
 
         // Find morph weights for this mesh: try exact shape name, then wildcard "*"
         const MorphData* morphData = nullptr;
@@ -828,7 +832,7 @@ void RenderScene::BuildMorphBuffers(const ActorMorphMap& morphs, ID3D11Device* d
     }
 
     SKSE::log::info("[SkyrimRenderer] BuildMorphBuffers: {}/{} meshes morphed",
-                    morphedCount, niflyMeshes_.size());
+                    morphedCount, loadedMeshes_.size());
 }
 
 // ============================================================================
@@ -836,9 +840,9 @@ void RenderScene::BuildMorphBuffers(const ActorMorphMap& morphs, ID3D11Device* d
 // ============================================================================
 
 bool RenderScene::MakeMeshDynamic(uint32_t meshIndex) {
-    if (meshIndex >= niflyMeshes_.size()) return false;
+    if (meshIndex >= loadedMeshes_.size()) return false;
 
-    auto& mesh = niflyMeshes_[meshIndex];
+    auto& mesh = loadedMeshes_[meshIndex];
     if (mesh.isDynamic) return true;  // already dynamic
 
     if (!device_ || !context_) return false;
@@ -876,9 +880,9 @@ bool RenderScene::MakeMeshDynamic(uint32_t meshIndex) {
 }
 
 bool RenderScene::UpdateMeshVertices(uint32_t meshIndex, const std::vector<PreviewVertex>& vertices) {
-    if (meshIndex >= niflyMeshes_.size()) return false;
+    if (meshIndex >= loadedMeshes_.size()) return false;
 
-    auto& mesh = niflyMeshes_[meshIndex];
+    auto& mesh = loadedMeshes_[meshIndex];
     if (!mesh.isDynamic) {
         SKSE::log::warn("[RenderScene] UpdateMeshVertices: mesh '{}' is not dynamic", mesh.name);
         return false;
@@ -1045,7 +1049,13 @@ Result RenderScene::Render() {
     if (bsState) bsState->SetCameraData(gameCamera, 0);
 
     // ── Clear render target ──────────────────────────────────────────────
-    float clearColor[4] = {backgroundColor_.r, backgroundColor_.g, backgroundColor_.b, backgroundColor_.a};
+    // In texture mode the clear is premultiplied: the alpha-blend state is
+    // (SRC_ALPHA, INV_SRC_ALPHA / ONE, INV_SRC_ALPHA), which keeps a
+    // premultiplied destination premultiplied, and opaque writes carry alpha 1.
+    float bgA = backgroundColor_.a;
+    float bgMul = textureMode_ ? bgA : 1.0f;
+    float clearColor[4] = {backgroundColor_.r * bgMul, backgroundColor_.g * bgMul,
+                           backgroundColor_.b * bgMul, bgA};
     renderTarget_.Clear(context_, clearColor);
 
     // Update scene graph only when geometry changed (not on camera-only updates)
@@ -1150,8 +1160,8 @@ Result RenderScene::Render() {
                                       renderTarget_.GetWidth(), renderTarget_.GetHeight());
     }
 
-    // ── Draw nifly meshes ────────────────────────────────────────────────
-    if (!niflyMeshes_.empty()) {
+    // ── Draw loaded meshes ────────────────────────────────────────────────
+    if (!loadedMeshes_.empty()) {
         if (shader_.IsReady()) {
             // Bind our render target and viewport
             ID3D11RenderTargetView* rtv = renderTarget_.GetRTV();
@@ -1165,6 +1175,33 @@ Result RenderScene::Render() {
             PerFrameData frameData = BuildPerFrameData();
             shader_.UpdatePerFrameConstants(context_, frameData);
 
+            // Community Shaders path: same camera; the strongest light is CS's
+            // directional light, the hemisphere ambient its directional ambient.
+            auto& csPath = CSRenderPath::Get();
+            const bool csActive = csPath.Active();
+            if (csActive) {
+                const float aspect = static_cast<float>(renderTarget_.GetWidth()) /
+                                     static_cast<float>(renderTarget_.GetHeight());
+                CSRenderPath::FrameInputs csFrame{};
+                csFrame.view = camera_.GetView();
+                csFrame.projection = camera_.GetProjection(aspect);
+                csFrame.cameraPos = frameData.cameraPos;
+                int key = -1;
+                for (uint32_t i = 0; i < kMaxLights; ++i) {
+                    if (lights_[i].enabled && (key < 0 || frameData.lights[i].intensity > frameData.lights[key].intensity)) {
+                        key = static_cast<int>(i);
+                    }
+                }
+                if (key >= 0) {
+                    const auto& l = frameData.lights[key];
+                    csFrame.keyLightDir = { l.dx, l.dy, l.dz };
+                    csFrame.keyLightColor = { l.r * l.intensity, l.g * l.intensity, l.b * l.intensity };
+                }
+                csFrame.ambient = ambient_;
+                csPath.BeginFrame(context_, csFrame);
+            }
+            meshRenderer_->SetUseCommunityShaders(csActive);
+
             // Enable stencil test for actor rendering (clips actor outside cutout region)
             if (overlayActive) {
                 meshRenderer_->SetStencilOverride(
@@ -1175,7 +1212,7 @@ Result RenderScene::Render() {
 
             // Set the GPU skinning pose for the mesh renderer
             meshRenderer_->SetCurrentPose(gpuSkinningPose_);
-            meshRenderer_->DrawMeshes(context_, niflyMeshes_);
+            meshRenderer_->DrawMeshes(context_, loadedMeshes_);
             meshRenderer_->SetCurrentPose(nullptr);
 
             if (overlayActive) {
@@ -1239,6 +1276,15 @@ Result RenderScene::Render() {
 
 ID3D11ShaderResourceView* RenderScene::GetRenderedTexture() const {
     return renderTarget_.GetSRV();
+}
+
+ID3D11Texture2D* RenderScene::GetRenderedTexture2D() const {
+    return renderTarget_.GetTexture();
+}
+
+void RenderScene::SetTextureMode(bool enabled) {
+    std::lock_guard lock(mutex_);
+    textureMode_ = enabled;
 }
 
 Result RenderScene::ReadbackPixels(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight) {

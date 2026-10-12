@@ -118,7 +118,15 @@ public:
 
     Result Render();
     ID3D11ShaderResourceView* GetRenderedTexture() const;
+    ID3D11Texture2D* GetRenderedTexture2D() const;
     Result ReadbackPixels(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight);
+
+    /// Texture mode: the scene feeds a texture consumer (a UI host sampling the
+    /// SRV) instead of the backbuffer composite or CPU readback. The render
+    /// target is cleared with a premultiplied background so the output alpha
+    /// contract is "sRGB-encoded, premultiplied" everywhere blending happens.
+    void SetTextureMode(bool enabled);
+    bool IsTextureMode() const { return textureMode_; }
 
     /// Kick off async GPU copy for readback (call after Render). Non-blocking.
     void BeginReadback();
@@ -139,7 +147,7 @@ public:
     uint32_t GetWidth() const { return renderTarget_.GetWidth(); }
     uint32_t GetHeight() const { return renderTarget_.GetHeight(); }
 
-    // ── Nifly Mesh Management ─────────────────────────────────────────────
+    // ── Mesh Management ─────────────────────────────────────────────
 
     uint32_t LoadNifMesh(const std::string& meshPath, MeshTag tag = MeshTag::None,
                          const std::string& skeletonPath = "",
@@ -161,20 +169,20 @@ public:
         float actorWeight = -1.0f;
         bool gpuSkinned = false;
         uint32_t partitionFilter = 0;  // BSDismemberSkinInstance: filter triangles for covered slots
-        // Output: range of meshes in niflyMeshes_ produced by this request
+        // Output: range of meshes in loadedMeshes_ produced by this request
         uint32_t meshStartIndex = 0;
         uint32_t meshCount = 0;
     };
 
     /// Load multiple NIF meshes in parallel using std::async.
-    /// Each NIF is loaded on a separate thread (BSA I/O + nifly parse + texture cache).
+    /// Each NIF is loaded on a separate thread (BSA I/O + NIF parse + texture cache).
     /// Results are collected and added to the scene on the caller's thread.
     /// @param requests  Vector of mesh load requests.
     /// @returns Total number of meshes loaded across all requests.
     uint32_t LoadNifMeshBatch(std::vector<MeshLoadRequest>& requests);
 
-    const std::vector<LoadedMesh>& GetLoadedMeshes() const { return niflyMeshes_; }
-    std::vector<LoadedMesh>& GetLoadedMeshesMut() { return niflyMeshes_; }
+    const std::vector<LoadedMesh>& GetLoadedMeshes() const { return loadedMeshes_; }
+    std::vector<LoadedMesh>& GetLoadedMeshesMut() { return loadedMeshes_; }
     void ClearLoadedMeshes();
     void ClearMeshesByTag(MeshTag tag);
 
@@ -186,6 +194,9 @@ public:
 
     /// Get the D3D11 device (for external GPU resource creation).
     ID3D11Device* GetDevice() const { return device_; }
+
+    /// Get the engine's immediate context (main-thread use only).
+    ID3D11DeviceContext* GetDeviceContext() const { return context_; }
 
     // ── Dynamic Vertex Buffers (for animation) ──────────────────────────────
 
@@ -253,6 +264,9 @@ private:
     // ENB
     ENBMode enbMode_ = ENBMode::Auto;
 
+    // Texture-consumer mode (premultiplied clear, no readback/composite)
+    bool textureMode_ = false;
+
     // Frame overlay
     FrameOverlayRenderer frameOverlay_;
     FrameOverlayConfig frameOverlayConfig_;
@@ -303,22 +317,22 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> CompilePostProcessShader(
         const std::string& source, const std::string& name);
 
-    // Nifly-loaded meshes
-    std::vector<LoadedMesh> niflyMeshes_;
+    // Meshes loaded from NIF data
+    std::vector<LoadedMesh> loadedMeshes_;
 
     // Cached head bone position (extracted from skeleton NIF for Face preset pivot)
     RE::NiPoint3 headBonePos_{0, 0, 0};
     bool hasHeadBone_ = false;
 
     // Mesh cache — keyed by "meshPath|skeletonPath", stores parsed+GPU-ready meshes.
-    // Eliminates disk I/O and nifly parsing on re-equip (ComPtrs share GPU buffers).
+    // Eliminates disk I/O and NIF parsing on re-equip (ComPtrs share GPU buffers).
     std::unordered_map<std::string, std::vector<LoadedMesh>> meshCache_;
 
     // Separate cache for GPU-skinned meshes (different vertex format: SkinnedVertex).
     std::unordered_map<std::string, std::vector<LoadedMesh>> skinnedMeshCache_;
 
     // Active morph buffers — kept alive for GPU binding during rendering.
-    // Keyed by mesh index (position in niflyMeshes_).
+    // Keyed by mesh index (position in loadedMeshes_).
     std::vector<MorphBuffer> morphBuffers_;
 
     // Dirty flags — skip expensive work when only camera changed

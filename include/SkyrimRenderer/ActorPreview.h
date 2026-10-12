@@ -14,6 +14,9 @@
 #include <unordered_map>
 #include <vector>
 
+struct SkyrimRenderer_HeadShapeInfo;
+struct SkyrimRenderer_HeadSourceInfo;
+
 namespace SkyrimRenderer {
 
 /// Resolve the HKX skeleton path from race + sex + skeleton NIF path.
@@ -30,7 +33,9 @@ public:
     /// Create an actor preview in the given scene.
     /// @param scene   The render scene to add the actor to.
     /// @param actorFormID  FormID of the actor to preview (e.g., 0x14 for player).
-    ActorPreview(RenderScene& scene, RE::FormID actorFormID);
+    /// @param headOnly  Load only the resolved head (face + head parts) and
+    ///                  expose its vertices for driving (LoadActorHead).
+    ActorPreview(RenderScene& scene, RE::FormID actorFormID, bool headOnly = false);
     ~ActorPreview();
 
     // Non-copyable
@@ -120,8 +125,11 @@ public:
 
     /// Apply the NIF skeleton's bind pose as the GPU skinning pose.
     /// Uses the same bone globals that ApplySkeletonPose uses, bypassing
-    /// the HKX skeleton and animation system entirely.
-    void ApplyNifBindPose();
+    /// the HKX skeleton and animation system entirely. Idempotent: a repeat
+    /// call rebuilds the same pose. Every preview but the player's live face
+    /// in a head preview rests on it: at load without an animation and
+    /// whenever the pose is reset. False when the skeleton NIF can't be read.
+    bool ApplyNifBindPose();
 
     /// Advance animation by one frame's worth of time.
     /// Called from the per-frame tick. Returns true if a re-render is needed.
@@ -137,6 +145,28 @@ public:
         std::string clipName;
     };
     AnimationState GetAnimationState() const;
+
+    // ── Live Face ───────────────────────────────────────────────────────────
+
+    /// Re-read the player's live face vertex positions (the engine's morphed
+    /// BSDynamicTriShape data, which carries the current expression) and upload
+    /// them into this preview's head meshes. Positions only; cheap enough to call
+    /// every few frames. Must run on the game's main thread. Returns false when
+    /// this preview is not the player, has no live-face meshes, or the player's
+    /// 3D is not loaded.
+    bool RefreshLiveFace();
+
+    // ── Drivable Head (head-only previews) ──────────────────────────────────
+
+    bool IsHeadOnly() const { return headOnly_; }
+    uint32_t GetHeadShapeCount() const;
+    bool GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo& out);
+    bool GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const;
+    /// SKYRIMRENDERER_HEAD_DRIVE_* flags; changing OFFSETS resets the arrays.
+    void SetHeadDriveFlags(uint32_t flags);
+    /// Upload every driven array that changed since the last call. Run before
+    /// each render of this actor's scene (SceneManager does it). Main thread.
+    void FlushDrivenHead();
 
     // ── Camera Presets ──────────────────────────────────────────────────────
 
@@ -158,10 +188,32 @@ private:
     // Load actor 3D from disk (for unloaded actors)
     Result LoadFromDisk(RE::TESNPC* npc);
 
+    // Head-only: resolved head of an NPC (loaded reference or base form)
+    Result LoadHeadOnly(RE::TESNPC* npc);
+
+    // Previews with no animation pose are drawn on the race skeleton NIF's
+    // bind pose, except the player's live face in a head preview.
+    bool RestsOnNifBindPose() const;
+
+    // Drop the animation pose: back to the NIF bind pose (see above); no pose
+    // (shapes drawn as stored) only for the player's live head preview.
+    void ResetGPUSkinningPose();
+
+    // Build nifSkeleton_ / nifBindPoseFallback_ from the skeleton NIF plus the
+    // loaded mesh NIFs' extra bones, once. False when the NIF can't be read.
+    bool EnsureNifSkeleton();
+
+    // Build drivenShapes_ from the loaded head meshes (end of RebuildMeshes)
+    void BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh);
+
+    // Re-upload a mesh's bindPoseVertices to its GPU vertex buffer (dynamic
+    // buffer created on first use, Map/WRITE_DISCARD afterwards).
+    bool UploadMeshBindPose(uint32_t meshIndex);
+
     // Attach an armor addon NIF to the skeleton (scene graph)
     Result AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARMA* armorAddon);
 
-    // Load all armor addon meshes via nifly for an armor piece
+    // Load all armor addon meshes (NifReader) for an armor piece
     void LoadArmorAddonMeshes(RE::TESObjectARMO* armor, RE::TESRace* race, bool isFemale, MeshTag tag,
                               std::vector<std::string>* loadedPaths = nullptr);
 
@@ -175,7 +227,10 @@ private:
     RE::NiNode* FindBone(const char* boneName) const;
 
     // Extract player's face meshes from the live scene graph (FaceGen is generated at runtime)
-    bool ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale);
+    bool ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet = false);
+
+    // Upload playerFaceMorphPositions_ into the meshes recorded in liveFaceBindings_.
+    bool UploadLiveFacePositions(bool quiet);
 
     // Composite player's tint mask layers into a single face tint texture
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> CompositePlayerTintLayers(ID3D11Device* device);
@@ -245,6 +300,32 @@ private:
     // Player face morph positions collected from live scene graph (shapeName → positions)
     // Used to patch disk-loaded head meshes with the player's actual morphed face geometry.
     std::unordered_map<std::string, std::vector<std::array<float, 3>>> playerFaceMorphPositions_;
+
+    // Loaded head mesh name → live face shape name, recorded when the disk-loaded
+    // head was first patched. RefreshLiveFace only touches these meshes.
+    std::unordered_map<std::string, std::string> liveFaceBindings_;
+
+    // ── Drivable head ──
+    bool headOnly_ = false;
+    struct DrivenShape {
+        uint32_t meshIndex = 0;
+        RE::BGSHeadPart* part = nullptr;
+        std::vector<float> positions;      // caller-written (absolute or offsets)
+        std::vector<float> rest;           // loaded positions
+        std::vector<float> uploaded;       // absolute positions last sent to the GPU
+        std::vector<float> restNormals;    // xyz per vertex, as loaded
+        std::vector<float> restTangents;   // xyzw per vertex, as loaded
+    };
+    std::vector<DrivenShape> drivenShapes_;
+    uint32_t headDriveFlags_ = 0;
+    bool headDriveDirty_ = false;          // flags changed: re-upload everything
+    struct HeadSource {
+        uint32_t source = 0;               // SKYRIMRENDERER_HEAD_SOURCE_*
+        std::string faceGenPath;
+        RE::TESNPC* visualNPC = nullptr;
+        bool skyPatcherDonor = false;
+    } headSource_;
+    std::vector<uint8_t> uploadScratch_;   // SkinnedVertex staging, reused per frame
 
     mutable std::mutex mutex_;
 };

@@ -19,9 +19,13 @@ class CameraController {
 public:
     void SetOrbit(float yaw, float pitch, float distance, float focalHeight);
     void SetFOV(float degrees);
+    /// `pose`: the scene's GPU-skinning pose, if any. FaceClose frames the
+    /// head where that pose draws it (call after SetPose); the other presets
+    /// ignore it.
     void SetPreset(CameraPreset preset, const std::vector<LoadedMesh>& meshes,
                    RE::NiNode* sceneRoot,
-                   const RE::NiPoint3* headBonePos = nullptr);
+                   const RE::NiPoint3* headBonePos = nullptr,
+                   const BonePoseMap* pose = nullptr);
 
     /// Pan the orbit center in camera-relative screen space.
     /// dx = horizontal (camera right), dy = vertical (world Z).
@@ -36,6 +40,10 @@ public:
 
     /// Get the view-projection matrix for the given render target aspect ratio.
     DirectX::XMMATRIX GetViewProjection(float aspectRatio) const;
+
+    /// View (world -> camera) and projection, row-vector convention (v * M).
+    DirectX::XMMATRIX GetView() const;
+    DirectX::XMMATRIX GetProjection(float aspectRatio) const;
 
     RE::NiPoint3 GetPosition() const { return cameraPosition_; }
     RE::NiPoint3 GetTarget() const { return cameraTarget_; }
@@ -52,6 +60,11 @@ public:
 private:
     void ComputeSceneBounds(RE::NiNode* sceneRoot,
                             RE::NiPoint3& outCenter, float& outRadius) const;
+
+    void FrameHeadShot(const std::vector<LoadedMesh>& meshes, const RE::NiPoint3* headBonePos,
+                       const RE::NiPoint3& center, float radius);
+    /// False (camera untouched) without a FaceGen face, eyes and a mouth.
+    bool FrameFaceClose(const std::vector<LoadedMesh>& meshes, const BonePoseMap* pose);
 
     float yaw_ = 0.0f;
     float pitch_ = 0.0f;
