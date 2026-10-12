@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.5.0
+    VERSION 1.6.0
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 
@@ -30,23 +30,6 @@ endif()
 # vcpkg packages  idempotent; safe to call even when parent already found them.
 find_package(spdlog REQUIRED CONFIG)
 find_package(directxtk CONFIG REQUIRED)
-
-# nifly: built inline (NOT via add_subdirectory) because nifly's own
-# CMakeLists.txt sets global CMAKE_CXX_STANDARD=17 which downgrades our
-# C++23 build and breaks CommonLib/address library loading.
-if(NOT TARGET nifly)
-    file(GLOB NIFLY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/extern/nifly/src/*.cpp")
-    add_library(nifly STATIC ${NIFLY_SOURCES})
-    target_include_directories(nifly PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/extern/nifly/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/extern/nifly/external")
-    target_compile_features(nifly PRIVATE cxx_std_17)
-    if(MSVC)
-        target_compile_options(nifly PRIVATE "/wd4996" "/utf-8" "/EHsc" "/bigobj")
-    endif()
-    set_target_properties(nifly PROPERTIES
-        MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
-endif()
 
 ###############################################################################
 # SkyrimRenderer library target
@@ -82,6 +65,11 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/SkyrimRendererAPI.h
     include/SkyrimRenderer/SkyrimRendererLoader.h
     include/SkyrimRenderer/GameFileReader.h
+    include/SkyrimRenderer/GameNifProbe.h
+    include/SkyrimRenderer/NifHeaderScan.h
+    include/SkyrimRenderer/NifReader.h
+    include/SkyrimRenderer/CommunityShaders.h
+    include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
 )
 
@@ -98,6 +86,11 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/MeshRenderer.cpp
     src/SkyrimRenderer/ScreenQuadRenderer.cpp
     src/SkyrimRenderer/FrameOverlayRenderer.cpp
+    src/SkyrimRenderer/GameNifProbe.cpp
+    src/SkyrimRenderer/NifHeaderScan.cpp
+    src/SkyrimRenderer/NifReader.cpp
+    src/SkyrimRenderer/CommunityShaders.cpp
+    src/SkyrimRenderer/CSRenderPath.cpp
     src/SkyrimRenderer/TextureLoader.cpp
     src/SkyrimRenderer/TextureCache.cpp
     src/SkyrimRenderer/MorphBuffer.cpp
@@ -134,7 +127,6 @@ target_include_directories(skyrim-renderer-lib PUBLIC
 target_link_libraries(skyrim-renderer-lib PUBLIC
     CommonLibSSE::CommonLibSSE
     spdlog::spdlog
-    nifly
     Microsoft::DirectXTK
     d3d11
     dxgi

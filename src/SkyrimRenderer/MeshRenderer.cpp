@@ -1,5 +1,6 @@
 #include "SkyrimRenderer/MeshRenderer.h"
 #include "SkyrimRenderer/NifMeshLoader.h"
+#include "SkyrimRenderer/CSRenderPath.h"
 
 #include <SKSE/SKSE.h>
 
@@ -179,6 +180,15 @@ void MeshRenderer::DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& me
         ctx->RSSetState(shader_.GetRasterStateDoubleSided());
     } else {
         ctx->RSSetState(shader_.GetRasterState());
+    }
+
+    // Community Shaders path: same skinning, morphs and raster state as above,
+    // CS's own pixel shader and the user's CS settings.
+    if (useCommunityShaders_ && CSRenderPath::Get().Handles(mesh)) {
+        CSRenderPath::Get().Draw(ctx, mesh, useGPUSkinning, shader_.GetInputLayout(useGPUSkinning),
+                                 shader_.GetSamplerState());
+        shader_.RestoreAfterForeignDraw(ctx);
+        return;
     }
 
     // Bind textures (NIF slots -> shader registers)

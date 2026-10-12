@@ -41,6 +41,10 @@ public:
     /// Get the view-projection matrix for the given render target aspect ratio.
     DirectX::XMMATRIX GetViewProjection(float aspectRatio) const;
 
+    /// View (world -> camera) and projection, row-vector convention (v * M).
+    DirectX::XMMATRIX GetView() const;
+    DirectX::XMMATRIX GetProjection(float aspectRatio) const;
+
     RE::NiPoint3 GetPosition() const { return cameraPosition_; }
     RE::NiPoint3 GetTarget() const { return cameraTarget_; }
 

@@ -88,6 +88,18 @@ public:
     /// Whether the skinned shader path is available.
     bool HasSkinnedShader() const { return skinnedVS_ != nullptr; }
 
+    /// Input layouts / sampler, shared with the Community Shaders bridge VS
+    /// (same vertex inputs).
+    ID3D11InputLayout* GetInputLayout(bool skinned) const {
+        return skinned ? skinnedInputLayout_.Get() : inputLayout_.Get();
+    }
+    ID3D11SamplerState* GetSamplerState() const { return samplerState_.Get(); }
+
+    /// Re-bind our VS/PS, input layout, PS constant buffers and sampler after
+    /// another path (Community Shaders) drew with its own. Leaves raster,
+    /// blend and depth state alone.
+    void RestoreAfterForeignDraw(ID3D11DeviceContext* ctx);
+
     /// Get the blend state for alpha blending (used by MeshRenderer for pass 3).
     ID3D11BlendState* GetBlendState() const { return blendState_.Get(); }
 

@@ -5,6 +5,7 @@
 #include "SkyrimRenderer/NifMeshLoader.h"
 #include "SkyrimRenderer/SkyPatcherService.h"
 #include "SkyrimRenderer/MorphTypes.h"
+#include "SkyrimRenderer/GameNifProbe.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -588,6 +589,8 @@ SKYRIMRENDERER_API void SkyrimRenderer_PreloadBodyMeshes(void) {
     if (!device) return;
 
     std::thread([device]() {
+        RunGameNifProbeIfRequested();
+
         const char* bodyNifs[] = {
             "meshes\\Actors\\Character\\Character Assets\\MaleBody_1.nif",
             "meshes\\Actors\\Character\\Character Assets\\MaleHands_1.nif",

@@ -399,13 +399,13 @@ Result ActorPreview::CloneFromLoaded(RE::Actor* actor) {
     skeletonNifPath_ = std::string("meshes\\") + skelModel.model.c_str();
     skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
 
-    // Create a dummy root node (we render via nifly meshes, not the scene graph)
+    // Create a dummy root node (we render our own loaded meshes, not the scene graph)
     auto* rootNode = RE::NiNode::Create(0);
     if (!rootNode) return Result::OutOfMemory;
     actorNode_ = RE::NiPointer<RE::NiNode>(rootNode);
     actorNode_->name = "SkyrimRenderer_ActorRoot";
 
-    // Clear any previous nifly meshes
+    // Clear any previously loaded meshes
     scene_.ClearLoadedMeshes();
 
     // Collect base outfit from biped data
@@ -442,7 +442,7 @@ Result ActorPreview::CloneFromLoaded(RE::Actor* actor) {
     }
     RebuildMeshes(outfitFormIDs);
 
-    SKSE::log::info("[SkyrimRenderer] Loaded actor 0x{:X} via nifly ({} base outfit items, {} meshes, gpuSkinning={})",
+    SKSE::log::info("[SkyrimRenderer] Loaded actor 0x{:X} from NIF data ({} base outfit items, {} meshes, gpuSkinning={})",
                     actor->GetFormID(), baseOutfit_.size(), scene_.GetLoadedMeshes().size(), useGPUSkinning_);
     return Result::Success;
 }
@@ -460,7 +460,7 @@ Result ActorPreview::LoadHeadOnly(RE::TESNPC* npc) {
     skeletonNifPath_ = std::string("meshes\\") + skelModel.model.c_str();
     skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
 
-    // Dummy root (rendering goes through the nifly meshes, not the scene graph)
+    // Dummy root (rendering goes through our loaded meshes, not the scene graph)
     auto* rootNode = RE::NiNode::Create(0);
     if (!rootNode) return Result::OutOfMemory;
     actorNode_ = RE::NiPointer<RE::NiNode>(rootNode);
@@ -525,13 +525,13 @@ Result ActorPreview::LoadFromDisk(RE::TESNPC* npc) {
     bool isFemale = npc->IsFemale();
     auto& skelModel = race->skeletonModels[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
 
-    // Load skeleton via BSModelDB (for scene graph) and nifly (for vertex data)
+    // Load skeleton via BSModelDB (for scene graph) and NifReader (for vertex data)
     auto skelPath = std::string("meshes\\") + skelModel.model.c_str();
     skeletonNifPath_ = skelPath;
     skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
     auto skeleton = LoadModel(skelPath);
 
-    // Load skeleton mesh data via nifly for rendering
+    // Load skeleton mesh data via NifReader for rendering
     scene_.LoadNifMesh(skelPath);
 
     if (!skeleton) {
@@ -809,7 +809,7 @@ Result ActorPreview::AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARM
         return Result::RenderFailed;
     }
 
-    // Also load via nifly for actual vertex data rendering
+    // Also load via NifReader for actual vertex data rendering
     scene_.LoadNifMesh(fullPath, MeshTag::None, "", nullptr, actorWeight_);
 
     // Name the node for tracking
@@ -2239,12 +2239,22 @@ static void ApplyTextureSetToMesh(LoadedMesh& mesh, RE::BGSTextureSet* set, ID3D
         return srv;
     };
     using Tex = RE::BSTextureSet::Texture;
-    if (auto srv = load(Tex::kDiffuse, true))          mesh.diffuseSRV = srv;   // TX00
+    // Keep the paths in step so the Community Shaders path's raw views follow.
+    auto path = [&](RE::BSTextureSet::Texture slot) { return std::string(set->textures[slot].textureName.c_str()); };
+    if (auto srv = load(Tex::kDiffuse, true)) {                                  // TX00
+        mesh.diffuseSRV = srv;
+        mesh.diffuseTexturePath = path(Tex::kDiffuse);
+        mesh.csDiffuseSRV.Reset();
+    }
     if (auto srv = load(Tex::kNormal, false))          mesh.normalSRV = srv;    // TX01
     if (auto srv = load(Tex::kEnvironmentMask, false)) mesh.envMaskSRV = srv;   // TX02 -> NIF slot 5
     if (auto srv = load(Tex::kGlowMap, false))         mesh.skSRV = srv;        // TX03 -> NIF slot 2 (_sk)
     if (auto srv = load(Tex::kHeight, false))          mesh.detailSRV = srv;    // TX04 -> NIF slot 3 (detail)
-    if (auto srv = load(Tex::kEnvironment, true))      mesh.cubemapSRV = srv;   // TX05 -> NIF slot 4 (cubemap)
+    if (auto srv = load(Tex::kEnvironment, true)) {                              // TX05 -> NIF slot 4 (cubemap)
+        mesh.cubemapSRV = srv;
+        mesh.cubemapTexturePath = path(Tex::kEnvironment);
+        mesh.csCubemapSRV.Reset();
+    }
     if (auto srv = load(Tex::kBacklightMask, false))   mesh.specularSRV = srv;  // TX07 -> NIF slot 7 (_s)
 }
 
@@ -2934,7 +2944,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
 }
 
 // ============================================================================
-// Armor Addon Mesh Loading (nifly)
+// Armor Addon Mesh Loading (NifReader)
 // ============================================================================
 
 void ActorPreview::LoadArmorAddonMeshes(RE::TESObjectARMO* armor, RE::TESRace* race,

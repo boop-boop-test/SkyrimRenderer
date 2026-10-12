@@ -53,6 +53,11 @@ public:
     /// calls it once per frame from the game's main thread.
     void Tick();
 
+    /// Queue work to run at the start of the next Tick(), i.e. on the game's
+    /// main thread. For engine calls that need main-thread state (e.g. loading
+    /// NIFs with Havok blocks). Tasks never run if nothing calls Tick().
+    void QueueTickTask(std::function<void()> task);
+
     /// Request an async render for a scene. Processed by the next Tick() (the
     /// Present hook or the consumer's own per-frame call). Scenes with a
     /// composite rect render for the composite; texture-mode scenes render into
@@ -404,6 +409,10 @@ private:
 
     // Per-frame callback (fires from Present hook before render/composite)
     PerFrameCallback perFrameCallback_;
+
+    // Work queued for the next Tick() (main thread)
+    std::mutex tickTasksMutex_;
+    std::vector<std::function<void()>> tickTasks_;
 
     // Animation frame timing
     std::chrono::steady_clock::time_point lastFrameTime_{};

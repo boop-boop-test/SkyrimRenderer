@@ -33,6 +33,10 @@ public:
                             UINT stencilRef);
     void ClearStencilOverride();
 
+    /// Draw supported meshes through CSRenderPath (Community Shaders) when it
+    /// is active; everything else keeps the native shader.
+    void SetUseCommunityShaders(bool enabled) { useCommunityShaders_ = enabled; }
+
 private:
     void DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& mesh);
 
@@ -47,6 +51,7 @@ private:
     ID3D11DepthStencilState* stencilOverrideReadOnly_ = nullptr;
     UINT stencilRef_ = 0;
     bool hasStencilOverride_ = false;
+    bool useCommunityShaders_ = false;
 };
 
 } // namespace SkyrimRenderer

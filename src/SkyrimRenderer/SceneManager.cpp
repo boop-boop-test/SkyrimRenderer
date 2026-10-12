@@ -1,5 +1,6 @@
 #include "SkyrimRenderer/SceneManager.h"
 #include "SkyrimRenderer/DX11StateGuard.h"
+#include "SkyrimRenderer/CommunityShaders.h"
 #include "SkyrimRenderer/HKXLoader.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TextureLoader.h"
@@ -117,8 +118,27 @@ HRESULT STDMETHODCALLTYPE SceneManager::HookedPresent(
     return originalPresent_(swapChain, syncInterval, flags);
 }
 
+void SceneManager::QueueTickTask(std::function<void()> task) {
+    std::lock_guard lock(tickTasksMutex_);
+    tickTasks_.push_back(std::move(task));
+}
+
 void SceneManager::Tick() {
+    std::vector<std::function<void()>> tasks;
+    {
+        std::lock_guard lock(tickTasksMutex_);
+        tasks.swap(tickTasks_);
+    }
+    for (auto& task : tasks) task();
+
     if (IsDeviceLost()) return;
+
+    // Pick up Community Shaders' live buffers/textures from CS's own bindings,
+    // before any of our renders touch the pixel stage this frame.
+    if (auto* renderer = RE::BSGraphics::Renderer::GetSingleton()) {
+        CommunityShaders::LiveResources::Get().Update(
+            reinterpret_cast<ID3D11DeviceContext*>(renderer->GetRuntimeData().context));
+    }
 
     // Advance playing animations (re-skins meshes, queues re-renders)
     auto now = std::chrono::steady_clock::now();
@@ -1034,15 +1054,41 @@ void SceneManager::CompositeAllScenes() {
     // (an over-release freed the game's buffer on Community Shaders 1.6-1.8.3), and
     // a FLIP_DISCARD / proxied swapchain cannot hand back a stale buffer.
     auto& framebufferRT = rendererData.renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
-    if (!framebufferRT.texture || !framebufferRT.RTV) {
-        SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: kFRAMEBUFFER not available (texture={} RTV={})",
-                         (void*)framebufferRT.texture, (void*)framebufferRT.RTV);
+    if (!framebufferRT.RTV) {
+        static uint32_t missingCount = 0;
+        if (++missingCount % 300 == 1) {
+            SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: kFRAMEBUFFER has no RTV (texture={})",
+                             (void*)framebufferRT.texture);
+        }
         return;
     }
-
-    D3D11_TEXTURE2D_DESC bbDesc;
-    framebufferRT.texture->GetDesc(&bbDesc);
     ID3D11RenderTargetView* backbufferRTV = framebufferRT.RTV;
+
+    // The texture field is only needed for the size. With Community Shaders'
+    // frame generation it is null while the RTV is valid, so take the size
+    // from the RTV's own resource.
+    D3D11_TEXTURE2D_DESC bbDesc{};
+    if (framebufferRT.texture) {
+        framebufferRT.texture->GetDesc(&bbDesc);
+    } else {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        backbufferRTV->GetResource(resource.GetAddressOf());
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        if (!resource || FAILED(resource.As(&texture))) {
+            static uint32_t noTextureCount = 0;
+            if (++noTextureCount % 300 == 1) {
+                SKSE::log::error("[SkyrimRenderer] CompositeAllScenes: kFRAMEBUFFER RTV is not a 2D texture");
+            }
+            return;
+        }
+        texture->GetDesc(&bbDesc);
+        static bool loggedFallback = false;
+        if (!loggedFallback) {
+            loggedFallback = true;
+            SKSE::log::info("[SkyrimRenderer] CompositeAllScenes: kFRAMEBUFFER texture is null (frame generation?); "
+                            "using the RTV's texture ({}x{})", bbDesc.Width, bbDesc.Height);
+        }
+    }
 
     // Single state guard for the entire compositing pass
     DX11StateGuard stateGuard(ctx);

@@ -213,7 +213,7 @@ private:
     // Attach an armor addon NIF to the skeleton (scene graph)
     Result AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARMA* armorAddon);
 
-    // Load all armor addon meshes via nifly for an armor piece
+    // Load all armor addon meshes (NifReader) for an armor piece
     void LoadArmorAddonMeshes(RE::TESObjectARMO* armor, RE::TESRace* race, bool isFemale, MeshTag tag,
                               std::vector<std::string>* loadedPaths = nullptr);
 

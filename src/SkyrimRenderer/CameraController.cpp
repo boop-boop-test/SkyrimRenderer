@@ -424,18 +424,23 @@ void CameraController::Update() {
     dirty_ = false;
 }
 
-DirectX::XMMATRIX CameraController::GetViewProjection(float aspectRatio) const {
+DirectX::XMMATRIX CameraController::GetView() const {
     using namespace DirectX;
 
     XMVECTOR eyePos = XMVectorSet(cameraPosition_.x, cameraPosition_.y, cameraPosition_.z, 1.0f);
     XMVECTOR targetPos = XMVectorSet(cameraTarget_.x, cameraTarget_.y, cameraTarget_.z, 1.0f);
     XMVECTOR upDir = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    return XMMatrixLookAtRH(eyePos, targetPos, upDir);
+}
 
-    XMMATRIX view = XMMatrixLookAtRH(eyePos, targetPos, upDir);
+DirectX::XMMATRIX CameraController::GetProjection(float aspectRatio) const {
+    using namespace DirectX;
     float fovRad = fov_ * XM_PI / 180.0f;
-    XMMATRIX proj = XMMatrixPerspectiveFovRH(fovRad, aspectRatio, 0.1f, 10000.0f);
+    return XMMatrixPerspectiveFovRH(fovRad, aspectRatio, 0.1f, 10000.0f);
+}
 
-    return view * proj;
+DirectX::XMMATRIX CameraController::GetViewProjection(float aspectRatio) const {
+    return GetView() * GetProjection(aspectRatio);
 }
 
 void CameraController::ComputeSceneBounds(RE::NiNode* sceneRoot,
