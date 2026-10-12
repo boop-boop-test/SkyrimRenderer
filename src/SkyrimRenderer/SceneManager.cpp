@@ -229,10 +229,10 @@ void SceneManager::LogPresentLayers(const void* presentSlot) {
 }
 
 bool SceneManager::InstallPresentHook(ConsumerId consumer) {
-    {
-        std::lock_guard lock(mutex_);
-        consumers_.insert(consumer);
-    }
+    // Held throughout: two installs racing would hook HookedPresent onto
+    // itself, and a racing last-consumer Shutdown would orphan the hook.
+    std::lock_guard lock(mutex_);
+    consumers_.insert(consumer);
     if (hookInstalled_) return true;
 
     auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -1271,7 +1271,6 @@ void SceneManager::DetachOverlayFromScene(OverlayHandle overlay) {
 
 void SceneManager::Shutdown(ConsumerId consumer) {
     std::vector<uint32_t> scenes, overlays;
-    bool last = false;
     {
         std::lock_guard lock(mutex_);
         for (const auto& [id, owner] : sceneOwners_) {
@@ -1284,20 +1283,26 @@ void SceneManager::Shutdown(ConsumerId consumer) {
         perFrameCallbacks_.erase(consumer);
         RebuildPerFrameSnapshot();
         consumers_.erase(consumer);
-        last = consumers_.empty();
     }
 
     for (auto id : scenes) DestroyScene(static_cast<SceneHandle>(id));
     for (auto id : overlays) RemoveOverlay(static_cast<OverlayHandle>(id));
+
+    // Decide "last" and tear down under one lock: a consumer that registered
+    // while the scenes above were destroyed keeps the shared state alive.
+    std::lock_guard lock(mutex_);
+    const bool last = consumers_.empty();
     SKSE::log::info("[SkyrimRenderer] Consumer {:#x} shut down ({} scenes, {} overlays){}", consumer,
                     scenes.size(), overlays.size(), last ? "; last consumer" : "");
-
-    if (last) ShutdownAll();
+    if (last) TeardownLocked();
 }
 
 void SceneManager::ShutdownAll() {
     std::lock_guard lock(mutex_);
+    TeardownLocked();
+}
 
+void SceneManager::TeardownLocked() {
     UninstallPresentHook();
 
     actors_.clear();

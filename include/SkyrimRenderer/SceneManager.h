@@ -360,8 +360,11 @@ private:
                                uint32_t bbWidth, uint32_t bbHeight,
                                RenderScene* scene, const ScreenRect& rect);
 
-    /// Uninstall the Present hook. Called by ShutdownAll().
+    /// Uninstall the Present hook. Called by TeardownLocked().
     void UninstallPresentHook();
+
+    /// Release every consumer's state and the shared state. Caller holds mutex_.
+    void TeardownLocked();
 
     /// Render with the device-lost guard: refuses after a loss, checks
     /// GetDeviceRemovedReason afterwards and latches the loss.
