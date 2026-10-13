@@ -11,6 +11,7 @@
 //   overlay  - screen-space image overlay
 //   pass     - post-process shader pass
 //   morphMap - morph weight builder (create, populate, apply, free)
+//   gpu      - GPU material, material instance or GPU texture (see "GPU materials")
 //
 // Return conventions:
 //   Functions returning uint32_t as "Result" use 0 = success.
@@ -1153,5 +1154,271 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers);
 // Current cap; out_poolSize (optional) gets the pool size (hardware threads - 2,
 // at most 6; 0 on a machine with too few cores to have a pool).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetPrepWorkers(uint32_t* out_poolSize);
+
+// ---- GPU materials ----
+//
+// Arbitrary texture processing on the engine device, shaped like UE5
+// materials:
+//   - A material is a compute shader, compiled once (off the frame path).
+//     Its parameters, input textures and outputs are read from the shader:
+//     nothing is declared twice.
+//   - A material instance overrides only what it changes (parameters by
+//     name, input textures by name) and inherits the rest from its parent:
+//     the material, or another instance (instance chains, as in UE5).
+//   - An instance runs by itself: whenever anything it depends on changed
+//     (its own or an ancestor's parameters, a bound input texture, the
+//     material becoming ready), it runs once at the next flush point.
+//     Unchanged instances cost nothing. An instance only runs once one of its
+//     outputs was requested (GetGpuInstanceOutput), so template instances
+//     never run.
+//   - Outputs are GPU textures the instance owns, created at its first run:
+//     by default the size of its first bound input, RGBA8 with that input's
+//     colour space, full mip chain. They stay on the GPU; nothing is read
+//     back, nothing touches the disk.
+//
+// Typical use (one material, one instance per actor):
+//   mat  = CreateGpuMaterial({ source = hlsl })
+//   inst = CreateGpuMaterialInstance(mat)
+//   SetGpuParamTexture(inst, "Source", WrapGpuTextureEngine(eyeDiffuse))
+//   SetGpuInstanceOutput(inst, 0, { format = LIKE_SOURCE, engineTexture = 1 })
+//   out  = GetGpuInstanceOutput(inst, 0)        -> GetGpuTexture(out, ...)
+//   SetGpuParamFloat(inst, "PupilScale", &v, 1)  // re-runs at the next flush
+//
+// Shader contract (cs_5_0):
+//   cbuffer Params           the instance parameters, by variable name. HLSL
+//                            initializers are the material's defaults
+//                            (float PupilScale = 1.0;).
+//   cbuffer GpuJob           optional, filled by the renderer:
+//                            { uint2 OutputSize; uint MipLevel; uint OutputSRGB; }
+//   Texture2D <name>         inputs, bound by name (SetGpuParamTexture).
+//   RWTexture2D<...> <name>  outputs, numbered 0.. in register order (u0..u7).
+//   SamplerState s0..s3      linear-clamp, linear-wrap, point-clamp, aniso-clamp.
+//   [numthreads(x, y, 1)]    the dispatch covers OutputSize (output 0).
+// Any registers; the renderer binds by reflection. An RGBA8_SRGB output is
+// written through a UNORM view: when OutputSRGB is 1, write sRGB-encoded
+// values. Always sample the original input: an instance may not read its own
+// output (it fails).
+//
+// Handles: one process-wide ID space for materials, instances and textures,
+// across every mod, never reused in a session. All of them belong to the mod
+// that created them and go with its Shutdown. Another mod's handle, a
+// destroyed one or 0 is INVALID: GetGpuStatus says so, GetGpuError returns 0,
+// the other calls do nothing and return 0.
+//
+// Threads: every call below is safe on any thread except FlushGpuWork. Work
+// only runs on the game's immediate context on the main thread, at a flush
+// point, all due instances under ONE graphics-state capture:
+//   - SkyrimRenderer_FlushGpuWork(): now (main thread, inside the frame; the
+//     same rule as RenderToTexture). Call it from a hook before the scene
+//     renders and the result is used the same frame.
+//   - SkyrimRenderer_Tick() and the Present hook, when they run. At Present
+//     the result is used from the next frame (one frame of latency).
+// State: the capture covers the compute shader, its constant buffers,
+// samplers and UAVs u0-u7, and SRV slots 0-127 on the vertex, pixel and
+// compute stages (binding an output as a UAV unbinds it from every SRV slot;
+// the engine's and Community Shaders' state caches would not rebind it).
+// UAV hidden counters are not preserved.
+//
+// Device loss: every handle reports DEVICE_LOST and no work runs again. SRV
+// pointers you borrowed are invalid. Destroying handles is still fine.
+
+enum {
+    SKYRIMRENDERER_GPU_PENDING = 0,      // compiling, loading, or waiting for an input / its first run
+    SKYRIMRENDERER_GPU_READY = 1,        // material compiled, texture usable, instance ran with its latest inputs
+    SKYRIMRENDERER_GPU_FAILED = 2,       // see GetGpuError
+    SKYRIMRENDERER_GPU_DEVICE_LOST = 3,
+    SKYRIMRENDERER_GPU_INVALID = 4,      // unknown, destroyed, or another mod's handle
+};
+
+// Status of any GPU handle (material, instance, texture).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuStatus(uint32_t handle);
+// UTF-8 error of a FAILED handle (compile log, load failure, missing input,
+// binding problem). Copies at most bufSize-1 bytes; returns the full length,
+// 0 for none.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuError(uint32_t handle, char* buf, uint32_t bufSize);
+// Destroys any GPU handle. A material or instance lives on (without its
+// handle) while instances made from it still exist. An instance's outputs go
+// with the instance; destroying an output handle directly is refused.
+SKYRIMRENDERER_API void SkyrimRenderer_DestroyGpuObject(uint32_t handle);
+// Runs every due instance now. Game main thread, inside the frame.
+SKYRIMRENDERER_API void SkyrimRenderer_FlushGpuWork(void);
+
+// ---- Materials ----
+enum {
+    SKYRIMRENDERER_GPU_MIPS_GENERATE = 0,   // run for mip 0, then generate the rest (box filter)
+    SKYRIMRENDERER_GPU_MIPS_PER_LEVEL = 1,  // run once per mip level (GpuJob.MipLevel / OutputSize per level)
+    SKYRIMRENDERER_GPU_MIPS_NONE = 2,       // write mip 0 only
+};
+typedef struct SkyrimRenderer_GpuMaterialDesc {
+    uint32_t structSize;
+    const char* source;          // HLSL text, or NULL with bytecode
+    const char* sourceName;      // for error messages; may be NULL
+    const char* entry;           // NULL = "main"
+    const char* const* defines;  // name, value, name, value, ..., NULL; may be NULL
+    const void* bytecode;        // a compiled cs_5_0 blob instead of source
+    uint32_t bytecodeSize;
+    uint32_t mips;               // SKYRIMRENDERER_GPU_MIPS_*
+} SkyrimRenderer_GpuMaterialDesc;
+
+// Compiles on a renderer thread (cached by source, entry and defines for the
+// session); returns at once with a PENDING handle. Instances can be made and
+// configured while it compiles.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_CreateGpuMaterial(const SkyrimRenderer_GpuMaterialDesc* desc);
+
+enum {
+    SKYRIMRENDERER_GPU_PARAM = 0,    // a variable in cbuffer Params
+    SKYRIMRENDERER_GPU_INPUT = 1,    // a Texture2D
+    SKYRIMRENDERER_GPU_OUTPUT = 2,   // an RWTexture2D (index = output number)
+};
+enum {
+    SKYRIMRENDERER_GPU_TYPE_FLOAT = 0,
+    SKYRIMRENDERER_GPU_TYPE_INT = 1,
+    SKYRIMRENDERER_GPU_TYPE_UINT = 2,
+    SKYRIMRENDERER_GPU_TYPE_BOOL = 3,
+    SKYRIMRENDERER_GPU_TYPE_OTHER = 4,  // textures, structs
+};
+typedef struct SkyrimRenderer_GpuParamInfo {
+    uint32_t structSize;
+    uint32_t kind;       // SKYRIMRENDERER_GPU_PARAM / INPUT / OUTPUT
+    uint32_t type;       // SKYRIMRENDERER_GPU_TYPE_* (params)
+    uint32_t columns;    // components per element (float3 = 3)
+    uint32_t rows;       // 1, or matrix rows
+    uint32_t elements;   // 0 = not an array
+    uint32_t size;       // bytes in the cbuffer
+    uint32_t index;      // output number for OUTPUT
+    char name[64];
+} SkyrimRenderer_GpuParamInfo;
+
+// What a READY material exposes (0 / 0 while it compiles).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuMaterialParamCount(uint32_t material);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuMaterialParam(uint32_t material, uint32_t index,
+                                                               SkyrimRenderer_GpuParamInfo* out);
+
+// ---- Instances ----
+// parent: a material, or another instance to inherit from.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_CreateGpuMaterialInstance(uint32_t parent);
+
+// Overrides by name. Values are written in order from the variable's start:
+// scalars and vectors as given; arrays one element per 16-byte register;
+// matrices as HLSL packs them (column-major unless the shader says
+// row_major). Names the material does not have are kept and ignored (so an
+// instance can be set up while its material compiles). Returns 1/0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetGpuParamFloat(uint32_t instance, const char* name, const float* values,
+                                                            uint32_t count);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetGpuParamInt(uint32_t instance, const char* name, const int32_t* values,
+                                                          uint32_t count);
+// Binds a texture handle to a Texture2D input by name (0 = inherit again).
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetGpuParamTexture(uint32_t instance, const char* name, uint32_t texture);
+// Drops an override (parameter or texture) so the parent's value applies
+// again; name NULL drops them all.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_ClearGpuParam(uint32_t instance, const char* name);
+
+enum {
+    SKYRIMRENDERER_GPU_FORMAT_LIKE_SOURCE = 0,  // RGBA8 or RGBA8_SRGB, as sizeFrom / the first input samples
+    SKYRIMRENDERER_GPU_FORMAT_RGBA8 = 1,        // R8G8B8A8_UNORM (how the engine samples eye and skin diffuse)
+    SKYRIMRENDERER_GPU_FORMAT_RGBA8_SRGB = 2,   // views: UAV UNORM, SRV UNORM_SRGB
+    SKYRIMRENDERER_GPU_FORMAT_RGBA16F = 3,
+    SKYRIMRENDERER_GPU_FORMAT_R8 = 4,           // masks
+};
+typedef struct SkyrimRenderer_GpuTextureDesc {
+    uint32_t structSize;
+    uint32_t width, height;     // 0, 0 = the size of sizeFrom
+    uint32_t sizeFrom;          // a texture handle; 0 = the instance's first bound input
+    uint32_t format;            // SKYRIMRENDERER_GPU_FORMAT_*
+    uint32_t mipLevels;         // 0 = full chain, 1 = none
+    uint32_t engineTexture;     // 1 = also build an engine texture (GetGpuTexture), see below
+} SkyrimRenderer_GpuTextureDesc;
+
+// How output `index` is created. Only before it exists (before its first
+// run); returns 0 after.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetGpuInstanceOutput(uint32_t instance, uint32_t index,
+                                                                const SkyrimRenderer_GpuTextureDesc* desc);
+// The texture handle of output `index` (0-7), owned by the instance. The
+// first call makes the instance run. The handle is PENDING until the first
+// run created it, READY after each run.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuInstanceOutput(uint32_t instance, uint32_t index);
+// Runs it again at the next flush even if nothing changed (for an input
+// whose contents changed outside the renderer). Returns 1/0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_RunGpuInstance(uint32_t instance);
+// Completed runs so far.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuInstanceRunCount(uint32_t instance);
+
+// ---- Textures ----
+// Inputs. The renderer keeps its own reference on what it wraps.
+//   SRV:     an ID3D11ShaderResourceView* on the engine device.
+//   Engine:  an RE::NiSourceTexture* (its renderer texture's SRV).
+//   Load:    a Data-relative DDS path ("textures\\actors\\..."), loaded on a
+//            renderer thread (BSA or loose; BC formats are fine). In the
+//            out-of-game test tools: a file path (DDS, or PNG via WIC).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapGpuTextureSRV(void* d3d11ShaderResourceView);
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapGpuTextureEngine(void* niSourceTexture);
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadGpuTexture(const char* dataPath);
+
+// Borrowed pointers; any out may be NULL. Returns 1 when READY.
+//   srv: ID3D11ShaderResourceView*, valid until the handle is destroyed (or
+//     the device is lost). AddRef it to keep it longer.
+//   engineTexture: RE::NiSourceTexture* (an output with engineTexture = 1;
+//     the wrapped object for WrapGpuTextureEngine; else NULL). See below.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuTexture(uint32_t texture, uint32_t* width, uint32_t* height,
+                                                         uint32_t* mipLevels, void** srv, void** engineTexture);
+
+// One-shot save of a texture mip to a PNG file, for checking results and
+// calibration; never per frame. At the next flush (after that flush's runs,
+// so it sees a parameter change made just before) the mip is copied, then
+// read back once the GPU has finished (no wait) and written on a renderer
+// thread. Any texture: outputs, wrapped and loaded inputs (BC decoded).
+// RGBA8, colour space as stored (an sRGB view's values are re-encoded).
+// utf8Path: absolute, or relative to the game folder; folders are created.
+// Returns a save handle (0 for a bad texture or path): PENDING until the file
+// is written, then READY, or FAILED with GetGpuError. Logged to
+// SkyrimRenderer.log. Destroy it with DestroyGpuObject when done (Shutdown
+// does too).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SaveGpuTexture(uint32_t texture, uint32_t mip, const char* utf8Path);
+
+// The same one-shot readback into memory (calibration: e.g. a radial profile
+// of an eye texture), never per frame. Returns a read handle (0 for a bad
+// texture): PENDING until the pixels are back, READY, or FAILED with
+// GetGpuError. Pick a small mip: 64x64 is plenty for a profile.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadGpuTextureAsync(uint32_t texture, uint32_t mip);
+enum {
+    SKYRIMRENDERER_GPU_READ_PENDING = 0,
+    SKYRIMRENDERER_GPU_READ_DONE = 1,              // copied into rgba
+    SKYRIMRENDERER_GPU_READ_FAILED = 2,            // failed, or not a read handle of this mod
+    SKYRIMRENDERER_GPU_READ_BUFFER_TOO_SMALL = 3,  // width / height are set: needs width * height * 4
+};
+// Any thread. Copies the pixels (tightly packed RGBA8 rows, top row first,
+// colour space as stored, BC decoded) once they are back; width and height
+// (optional) are set when the read is done. The pixels stay with the handle
+// until DestroyGpuObject, so it can be polled again.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint8_t* rgba, uint32_t bufSize,
+                                                              uint32_t* width, uint32_t* height);
+
+// Engine textures (outputs with engineTexture = 1). Verified in game on AE
+// 1.6.1170 (NTJH issue 165, gate 1: per-actor eye material swaps on envmap
+// and glow eye materials, restore, no placeholder left behind); SE and VR
+// not yet. Fails closed: engineTexture stays NULL and the output FAILED with
+// the reason whenever the engine does not hand out a private texture object.
+//   - The engine only hands out a private texture object for a file that
+//     exists, so the renderer writes a placeholder DDS (BC1, the output's
+//     size and mip count) under a unique name
+//     (Data\textures\skyrimrenderer\gpu\<handle>.dds; under MO2: overwrite),
+//     deleted as soon as the engine has loaded it (leftovers from a crashed
+//     session are swept on first use), lets the engine load it, and swaps the
+//     D3D texture and view inside the engine's renderer texture for the
+//     output's. The engine owns and frees everything as usual; its renderer
+//     texture holds its OWN reference on our D3D texture and view, released
+//     when the last NiPointer to the NiSourceTexture goes, so a material that
+//     still holds it never samples a freed resource.
+//   - The renderer holds one NiPointer until the instance is destroyed (or
+//     its mod shuts down). Put the original texture back in every material
+//     slot you replaced BEFORE that: nothing is restored for you. A material
+//     that still holds it afterwards keeps drawing the last contents until it
+//     lets go; no instance writes it any more.
+//   - It samples as the output's SRV does: with LIKE_SOURCE and the original
+//     engine texture as the first input, sRGB exactly when the original was
+//     (vanilla eyes: UNORM).
+//   - The same object is what the game draws; renderer preview scenes get no
+//     separate copy or override.
+//   - Device loss: the object stays valid; its contents are undefined.
 
 } // extern "C"
