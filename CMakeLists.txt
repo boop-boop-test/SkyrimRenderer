@@ -71,6 +71,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/CommunityShaders.h
     include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
+    include/SkyrimRenderer/MaterialSetup.h
+    include/SkyrimRenderer/EffectShaderPass.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -103,6 +105,9 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
     src/SkyrimRenderer/WorkerPool.cpp
+    src/SkyrimRenderer/MaterialSetup.cpp
+    src/SkyrimRenderer/EffectShaderPass.cpp
+    src/SkyrimRenderer/RenderSceneMaterials.cpp
 )
 
 # Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at

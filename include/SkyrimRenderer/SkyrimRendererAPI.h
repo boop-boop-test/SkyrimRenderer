@@ -595,4 +595,36 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float expo
 // Any out pointer may be NULL. Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
 
+// ---- Materials (API 10) ----
+//
+// TruePBR meshes (Community Shaders PBR: the kMenuScreen shader flag that PBR
+// NIF patchers / ParallaxGen set) are shaded as metallic/roughness PBR from
+// their RMAOS map instead of as vanilla Blinn-Phong, and drawn by Community
+// Shaders' own TruePBR shader when the CS path is on and its cache has the
+// permutation. Refraction shapes (torch heat haze) are no longer drawn. Glow
+// maps (shader type 2) and SLSF1_OWN_EMIT materials emit. None of this needs
+// a call; the functions below are per-scene switches.
+//
+// Optional bloom: the shader folder ships PostProcess/Bloom.ps.hlsl for the
+// post-process stack, e.g. AddPostProcess(scene, "Bloom", 1,
+// "<shader dir>/PostProcess/Bloom.ps.hlsl", 100) and SetPostProcessParams
+// { threshold (0.75), intensity (0.6), radius px (8) } (<= 0 = default).
+
+// Draw BSEffectShaderProperty shapes (glow cards, flames, magic auras) unlit
+// after the lit passes: source texture x emissive colour x multiple, greyscale
+// palette, view-angle falloff, the NiAlphaProperty's blend (additive, alpha,
+// multiply), depth test on, depth write off. Shapes without a source texture
+// or without blending are never drawn. Default 1 (on); 0 hides them, as builds
+// before API 10 did. Effect shapes never move the camera presets' framing.
+SKYRIMRENDERER_API void    SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled);
+// 1/0; 0 for an unknown scene.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene);
+
+// Scale on every emissive contribution of a scene: materials' own emittance,
+// glow / PBR emissive maps and effect shapes. Default 1.0; 0 turns emission
+// and effect shapes off; negative clamps to 0.
+SKYRIMRENDERER_API void    SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale);
+// 1.0 for an unknown scene.
+SKYRIMRENDERER_API float   SkyrimRenderer_GetEmissiveScale(uint32_t scene);
+
 } // extern "C"

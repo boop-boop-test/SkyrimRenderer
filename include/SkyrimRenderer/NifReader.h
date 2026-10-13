@@ -109,6 +109,11 @@ struct ShaderProperty {
     float skinTintColor[3]{};       // shader type 5
     float hairTintColor[3]{};       // shader type 6
     float eyeCubemapScale = 0.0f;   // shader type 16
+
+    // Effect only (BSEffectShaderProperty).
+    float falloff[4]{ 1.0f, 1.0f, 1.0f, 1.0f };  // start angle, stop angle (cosines), start, stop opacity
+    float softFalloffDepth = 0.0f;
+    uint8_t lightingInfluence = 0;  // 0-255
 };
 
 struct AlphaProperty {

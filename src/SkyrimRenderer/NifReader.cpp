@@ -582,11 +582,13 @@ void File::ParseBlock(int32_t index, const uint8_t* fileData) {
         r.Floats(shader.uvOffset, 2);
         r.Floats(shader.uvScale, 2);
         auto source = r.SizedString();
-        r.Skip(4);   // clamp mode, lighting influence, env map min LOD, unknown
-        r.Skip(16);  // falloff start/stop angle and opacity
+        r.Read<uint8_t>();  // texture clamp mode
+        shader.lightingInfluence = r.Read<uint8_t>();
+        r.Skip(2);   // env map min LOD, unknown
+        r.Floats(shader.falloff, 4);  // falloff start/stop angle and opacity
         r.Floats(shader.emissiveColor, 4);
         shader.emissiveMultiple = r.Read<float>();
-        r.Read<float>();  // soft falloff depth
+        shader.softFalloffDepth = r.Read<float>();
         auto greyscale = r.SizedString();
         // Texture slots as the lighting shader's set would number them:
         // 0 source (diffuse), 3 greyscale palette.

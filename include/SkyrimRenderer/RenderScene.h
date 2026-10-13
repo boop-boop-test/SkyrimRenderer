@@ -122,6 +122,18 @@ public:
     void SetToneMapping(float exposure, float whitePoint);
     void GetToneMapping(float& exposure, float& whitePoint) const;
 
+    // ── Materials (RenderSceneMaterials.cpp) ────────────────────────────────
+
+    /// Draw BSEffectShaderProperty shapes (glows, flames, auras) unlit after
+    /// the lit passes. Default on.
+    void SetEffectShadersEnabled(bool enabled);
+    bool GetEffectShadersEnabled() const;
+
+    /// Scale on all emission (own emittance, glow / PBR emissive maps, effect
+    /// shapes). Default 1, 0 = none, negative clamps to 0.
+    void SetEmissiveScale(float scale);
+    float GetEmissiveScale() const;
+
     // ── Rendering ───────────────────────────────────────────────────────────
 
     /// saveState: save and restore the immediate context around the render.

@@ -58,6 +58,9 @@ public:
     /// Re-reads the knobs from the opt-in file (called on save load).
     void ReloadKnobs();
 
+    /// Scene emissive scale for the next draws (MeshRenderer sets it per draw).
+    void SetEmissiveScale(float scale) { emissiveScale_ = scale; }
+
     /// Draws `mesh` with CS's shader. Leaves the native pipeline's VS-stage
     /// buffers (camera, bones, morphs) in place; the caller restores its own
     /// shaders afterwards. `gpuSkinned` selects the skinned bridge VS.
@@ -125,6 +128,7 @@ private:
     std::vector<uint8_t> sharedScratch_;            // CS's SharedData, read back
     std::vector<uint8_t> perFrameBytes_;            // camera block, built in BeginFrame
     FrameInputs frame_{};
+    float emissiveScale_ = 1.0f;
 };
 
 } // namespace SkyrimRenderer
