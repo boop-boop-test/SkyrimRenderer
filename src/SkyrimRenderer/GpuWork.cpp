@@ -722,32 +722,49 @@ void GpuWork::EnsureSamplers(ID3D11Device* device) {
 
 namespace {
 
-/// A 4x4 BGRA8 DDS: the placeholder file behind an engine texture.
-bool WritePlaceholderDDS(const std::filesystem::path& file) {
+/// The placeholder file behind an engine texture: BC1 (all zero blocks) at
+/// the output's size and mip count, so the engine's idea of the texture
+/// (dimensions, mips: LOD, streaming) matches what is drawn. 1024x1024 with
+/// mips is ~700 KB, and only exists until the engine has loaded it.
+bool WritePlaceholderDDS(const std::filesystem::path& file, uint32_t width, uint32_t height, uint32_t mips) {
     std::error_code ec;
-    if (std::filesystem::exists(file, ec)) return true;
     std::filesystem::create_directories(file.parent_path(), ec);
+    auto blocks = [](uint32_t w, uint32_t h) { return uint64_t(std::max((w + 3) / 4, 1u)) * std::max((h + 3) / 4, 1u); };
     uint32_t header[32]{};
-    header[0] = 0x20534444;            // "DDS "
-    header[1] = 124;                   // header size
-    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8;  // caps, height, width, pixel format, pitch
-    header[3] = 4;                     // height
-    header[4] = 4;                     // width
-    header[5] = 16;                    // pitch
-    header[19] = 32;                   // pixel format size
-    header[20] = 0x1 | 0x40;           // alpha pixels, RGB
-    header[22] = 32;                   // bits per pixel
-    header[23] = 0x00FF0000;           // R
-    header[24] = 0x0000FF00;           // G
-    header[25] = 0x000000FF;           // B
-    header[26] = 0xFF000000;           // A
-    header[27] = 0x1000;               // caps: texture
-    uint32_t pixels[16];
-    std::fill(std::begin(pixels), std::end(pixels), 0xFF808080u);
-    std::ofstream out(file, std::ios::binary);
+    header[0] = 0x20534444;                                    // "DDS "
+    header[1] = 124;                                           // header size
+    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000;  // caps, height, width, pixel format, mips, linear size
+    header[3] = height;
+    header[4] = width;
+    header[5] = static_cast<uint32_t>(blocks(width, height) * 8);
+    header[7] = mips;
+    header[19] = 32;                                           // pixel format size
+    header[20] = 0x4;                                          // FourCC
+    header[21] = 0x31545844;                                   // "DXT1"
+    header[27] = 0x1000 | (mips > 1 ? 0x400008u : 0u);         // texture (+ mipmap, complex)
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(header), sizeof(header));
-    out.write(reinterpret_cast<const char*>(pixels), sizeof(pixels));
+    const std::vector<char> zeros(64 * 1024, 0);
+    for (uint32_t level = 0; level < mips; ++level) {
+        uint64_t bytes = blocks(std::max(width >> level, 1u), std::max(height >> level, 1u)) * 8;
+        while (bytes) {
+            const auto n = static_cast<std::streamsize>(std::min<uint64_t>(bytes, zeros.size()));
+            out.write(zeros.data(), n);
+            bytes -= static_cast<uint64_t>(n);
+        }
+    }
     return static_cast<bool>(out);
+}
+
+/// Placeholders left by an earlier session (a crash before they were
+/// deleted): none can be in use yet when the first engine texture is made.
+void SweepPlaceholders(const std::filesystem::path& dir) {
+    std::error_code ec;
+    size_t removed = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.path().extension() == ".dds" && std::filesystem::remove(entry.path(), ec)) ++removed;
+    }
+    if (removed) SKSE::log::info("[GpuWork] removed {} stale engine texture placeholders", removed);
 }
 
 }  // namespace
@@ -755,15 +772,28 @@ bool WritePlaceholderDDS(const std::filesystem::path& file) {
 bool GpuWork::MakeEngineTexture(Texture& texture, uint32_t handle) {
     // The engine only hands out a private texture object for a file that
     // exists (a missing path gets a shared fallback such as
-    // bsshader_defnormalmap). So: a tiny placeholder DDS under a unique name,
+    // bsshader_defnormalmap). So: a placeholder DDS under a unique name,
     // loaded by the engine as any texture is (allocated, linked and later
     // freed by the engine itself), then its renderer texture's D3D texture
     // and view are swapped for the output's. When the last reference goes,
     // the engine releases our D3D objects with its own Release calls.
     const auto id = std::format("{:08x}", handle);
     const auto path = std::format("textures\\skyrimrenderer\\gpu\\{}.dds", id);
-    const auto file = std::filesystem::path("Data") / "textures" / "skyrimrenderer" / "gpu" / (id + ".dds");
-    if (!WritePlaceholderDDS(file)) {
+    const auto dir = std::filesystem::path("Data") / "textures" / "skyrimrenderer" / "gpu";
+    const auto file = dir / (id + ".dds");
+    static std::once_flag swept;
+    std::call_once(swept, [&] { SweepPlaceholders(dir); });
+    // The file is only needed while the engine loads it: removed right after,
+    // on every path, so nothing piles up in Data (MO2: overwrite).
+    struct RemoveFile {
+        std::filesystem::path path;
+        ~RemoveFile() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            if (ec) SKSE::log::warn("[GpuWork] could not remove placeholder {}: {}", path.string(), ec.message());
+        }
+    } removeAfterLoad{ file };
+    if (!WritePlaceholderDDS(file, texture.width, texture.height, texture.mips)) {
         texture.Fail(std::format("engine texture: cannot write the placeholder {}", file.string()));
         return false;
     }

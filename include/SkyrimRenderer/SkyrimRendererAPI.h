@@ -1398,9 +1398,11 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint
 // output FAILED with the reason when the engine does not hand out a private
 // texture object.
 //   - The engine only hands out a private texture object for a file that
-//     exists, so the renderer writes a 4x4 placeholder DDS under a unique name
-//     (Data\textures\skyrimrenderer\gpu\<handle>.dds; under MO2 it lands in
-//     overwrite), lets the engine load it like any texture, and swaps the
+//     exists, so the renderer writes a placeholder DDS (BC1, the output's
+//     size and mip count) under a unique name
+//     (Data\textures\skyrimrenderer\gpu\<handle>.dds; under MO2: overwrite),
+//     deleted as soon as the engine has loaded it (leftovers from a crashed
+//     session are swept on first use), lets the engine load it, and swaps the
 //     D3D texture and view inside the engine's renderer texture for the
 //     output's. The engine owns and frees everything as usual; its renderer
 //     texture holds its OWN reference on our D3D texture and view, released
