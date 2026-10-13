@@ -742,3 +742,86 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* 
     if (out_whitePoint) *out_whitePoint = whitePoint;
     return rs ? 1 : 0;
 }
+
+// --- API 10: equipment & picking --------------------------------------------
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn) {
+    const auto h = hand == SKYRIMRENDERER_HAND_LEFT ? ActorPreview::HeldHand::Left : ActorPreview::HeldHand::Right;
+    return FromResult(SceneManager::GetInstance().EquipWeapon(
+        ToActor(actor), static_cast<RE::FormID>(formID), h, drawn != 0));
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_UnequipWeapon(uint32_t actor, uint32_t formID) {
+    return FromResult(SceneManager::GetInstance().UnequipWeapon(ToActor(actor), static_cast<RE::FormID>(formID)));
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetWeaponsDrawn(uint32_t actor, int32_t drawn) {
+    SceneManager::GetInstance().SetWeaponsDrawn(ToActor(actor), drawn != 0);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeldItems(
+    uint32_t actor, uint32_t* out_formIDs, uint32_t* out_hands, uint32_t maxCount) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    if (!a || !out_formIDs) return 0;
+    const auto items = a->GetHeldItems();
+    const uint32_t count = std::min(static_cast<uint32_t>(items.size()), maxCount);
+    for (uint32_t i = 0; i < count; ++i) {
+        out_formIDs[i] = static_cast<uint32_t>(items[i].first);
+        if (out_hands) out_hands[i] = static_cast<uint32_t>(items[i].second);
+    }
+    return count;
+}
+
+namespace {
+
+void ToApiPick(const RenderScene::PickHit& hit, ActorHandle actor, SkyrimRenderer_PickResult& out) {
+    const uint32_t structSize = out.structSize;
+    std::memset(&out, 0, sizeof(out));
+    out.structSize = structSize;
+    out.hit = hit.hit ? 1 : 0;
+    out.x = hit.x;
+    out.y = hit.y;
+    if (!hit.hit) return;
+    out.actor = static_cast<uint32_t>(actor);
+    out.formID = hit.formID;
+    out.slotMask = hit.slotMask;
+    out.kind = hit.kind;
+    out.flags = hit.flags;
+    out.meshIndex = hit.meshIndex;
+    strncpy_s(out.shapeName, sizeof(out.shapeName), hit.shapeName.c_str(), _TRUNCATE);
+}
+
+}  // namespace
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PickAt(uint32_t scene, uint32_t x, uint32_t y, SkyrimRenderer_PickResult* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_PickResult)) return 0;
+    RenderScene::PickHit hit;
+    ActorHandle actor = ActorHandle::Invalid;
+    const bool found = SceneManager::GetInstance().PickAt(ToScene(scene), x, y, hit, actor);
+    ToApiPick(hit, actor, *out);
+    return found ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_RequestPick(uint32_t scene, uint32_t x, uint32_t y) {
+    SceneManager::GetInstance().RequestPick(ToScene(scene), x, y);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetPickResult(uint32_t scene, SkyrimRenderer_PickResult* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_PickResult)) return 0;
+    RenderScene::PickHit hit;
+    ActorHandle actor = ActorHandle::Invalid;
+    if (!SceneManager::GetInstance().GetPickResult(ToScene(scene), hit, actor)) return 0;
+    ToApiPick(hit, actor, *out);
+    return 1;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
+    uint32_t actor, uint32_t formID, const SkyrimRenderer_Color* color, uint32_t mode, uint32_t outlineWidth) {
+    SkyrimRenderer::Color c{1.0f, 0.8f, 0.2f, 1.0f};
+    if (color) c = {color->r, color->g, color->b, color->a};
+    return SceneManager::GetInstance().SetHighlight(ToActor(actor), formID, c, mode, outlineWidth) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID) {
+    SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
+}

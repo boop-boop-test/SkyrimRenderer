@@ -337,6 +337,23 @@ public:
     /// Destroy an actor preview.
     void DestroyActorPreview(ActorHandle handle);
 
+    // ── Held items / picking / highlight (SceneManagerPicking.cpp) ─────────
+
+    Result EquipWeapon(ActorHandle actor, RE::FormID formID, ActorPreview::HeldHand hand, bool drawn);
+    Result UnequipWeapon(ActorHandle actor, RE::FormID formID);
+    void SetWeaponsDrawn(ActorHandle actor, bool drawn);
+
+    /// Synchronous pick (render thread). The hit's owner is mapped to its
+    /// actor handle (Invalid for scene meshes).
+    bool PickAt(SceneHandle scene, uint32_t x, uint32_t y, RenderScene::PickHit& out, ActorHandle& outActor);
+    /// Queue an async pick and a render of the scene (any thread).
+    void RequestPick(SceneHandle scene, uint32_t x, uint32_t y);
+    /// Latest finished async pick, once. False when none is ready.
+    bool GetPickResult(SceneHandle scene, RenderScene::PickHit& out, ActorHandle& outActor);
+
+    bool SetHighlight(ActorHandle actor, uint32_t formID, const Color& color, uint32_t mode, uint32_t width);
+    void ClearHighlight(ActorHandle actor, uint32_t formID);
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// Set `consumer`'s callback that fires every frame from the Present hook,
@@ -361,6 +378,12 @@ private:
 
     /// Processes all pending render requests. Called from Tick().
     void ProcessPendingRenders();
+
+    /// Finish async picks whose texel an earlier render copied. Called from Tick().
+    void CollectPicks();
+
+    /// Actor handle of an ActorPreview (LoadedMesh::owner); Invalid if none.
+    ActorHandle FindActorHandle(const void* preview);
 
     /// Composite ALL scenes with active composite rects into the engine's
     /// framebuffer. Called every frame from HookedPresent.

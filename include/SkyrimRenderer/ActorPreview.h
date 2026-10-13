@@ -66,6 +66,30 @@ public:
     /// Get the list of currently equipped armor FormIDs.
     std::vector<RE::FormID> GetEquippedItems() const;
 
+    // ── Held Items (ActorPreviewHeldItems.cpp) ──────────────────────────────
+    // Weapons, torches and ammo hang rigidly from skeleton nodes (hand nodes
+    // when drawn, sheath nodes when not) and follow the pose. Shields are
+    // armor (skinned to SHIELD) kept in the equipped list. Node rules: see
+    // SkyrimRenderer_EquipWeapon in SkyrimRendererAPI.h.
+
+    enum class HeldHand : uint32_t { Right = 0, Left = 1, Both = 2, None = 3 };
+
+    /// WEAP, LIGH, AMMO, or ARMO in the shield slot.
+    static bool IsHeldItemForm(RE::FormID formID);
+
+    /// Equip a held item; `hand` is ignored where the item fixes it (torch:
+    /// left, ammo: none, two-handed: both, shield: left). Sets the drawn state
+    /// of every held weapon.
+    Result EquipHeldItem(RE::FormID formID, HeldHand hand, bool drawn);
+
+    /// Remove a held item or shield (0 = every held item, not the shield).
+    Result UnequipHeldItem(RE::FormID formID);
+
+    /// Draw or sheathe every held weapon (retargets the meshes, no reload).
+    void SetHeldItemsDrawn(bool drawn);
+
+    std::vector<std::pair<RE::FormID, HeldHand>> GetHeldItems() const;
+
     // ── Body Morphs ──────────────────────────────────────────────────────────
 
     /// Set morph data for this actor. Applied to body/equipment meshes
@@ -344,6 +368,33 @@ private:
         bool skyPatcherDonor = false;
     } headSource_;
     std::vector<uint8_t> uploadScratch_;   // SkinnedVertex staging, reused per frame
+
+    // ── Held items ──
+    enum class HeldType : uint8_t {
+        Sword, Dagger, Axe, Mace, TwoHanded, Bow, Crossbow, Staff, HandToHand, Torch, Arrow, Bolt
+    };
+    struct HeldItem {
+        RE::FormID formID = 0;
+        HeldHand hand = HeldHand::Right;
+        HeldType type = HeldType::Sword;
+        uint8_t kind = 0;                   // SKYRIMRENDERER_PICK_*
+        std::string modelPath;              // "meshes\..." 3rd-person world model
+    };
+    std::vector<HeldItem> heldItems_;
+    bool heldDrawn_ = false;
+    // Rigid meshes per model path (GPU buffers shared by the copies placed in the scene)
+    std::unordered_map<std::string, std::vector<LoadedMesh>> heldMeshCache_;
+
+    Result EquipHeldItemLocked(RE::FormID formID, HeldHand hand, bool drawn);
+    Result UnequipHeldItemLocked(RE::FormID formID);
+    // Append every held item's meshes to the scene (end of RebuildMeshes and
+    // after a held-item change). Caller holds mutex_.
+    void LoadHeldItemMeshes();
+    // Remove this preview's held-item meshes from the scene.
+    void RemoveHeldItemMeshes();
+    // Node a held item hangs from (and its scabbard), for the current drawn state.
+    std::pair<std::string, std::string> ResolveHeldNodes(const HeldItem& item) const;
+    std::string FirstSkeletonNode(std::initializer_list<const char*> names, const char* fallback) const;
 
     mutable std::mutex mutex_;
 };

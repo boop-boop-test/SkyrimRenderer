@@ -71,6 +71,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/CommunityShaders.h
     include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
+    include/SkyrimRenderer/PickRenderer.h
+    include/SkyrimRenderer/RigidMeshLoader.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -102,6 +104,11 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SplineDecompressor.cpp
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
+    src/SkyrimRenderer/ActorPreviewHeldItems.cpp
+    src/SkyrimRenderer/PickRenderer.cpp
+    src/SkyrimRenderer/RenderScenePicking.cpp
+    src/SkyrimRenderer/RigidMeshLoader.cpp
+    src/SkyrimRenderer/SceneManagerPicking.cpp
     src/SkyrimRenderer/WorkerPool.cpp
 )
 

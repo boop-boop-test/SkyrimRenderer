@@ -221,6 +221,17 @@ struct LoadedMesh {
     /// nullptr means no morph deltas — shader skips morph application.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> morphDeltaSRV;
     uint32_t morphVertexCount = 0;
+
+    // ── Source (picking / highlight) ────────────────────────────────────────
+
+    /// What the mesh was loaded for. Stamped by ActorPreview on the scene's
+    /// copy after loading (cached meshes keep the defaults). A mesh with no
+    /// owner is a plain scene mesh (LoadMesh).
+    const void* owner = nullptr;     // the ActorPreview that loaded it
+    uint32_t sourceFormID = 0;       // ARMO / WEAP / LIGH / AMMO / BGSHeadPart, 0 = body or unknown
+    uint32_t sourceSlotMask = 0;     // biped slots (ARMA slots for armor, the body part's slot)
+    uint8_t  sourceKind = 0;         // SKYRIMRENDERER_PICK_* (SkyrimRendererAPI.h)
+    uint8_t  sourceFlags = 0;        // SKYRIMRENDERER_PICKFLAG_*
 };
 
 /// Apply morph deltas to a vertex array in-place.
