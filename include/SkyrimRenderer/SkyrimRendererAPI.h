@@ -953,4 +953,131 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_CreateLiveFaceCam(uint32_t refFormID, 
 // Destroy a face cam's scene, its actor and its mirror (DestroyScene).
 SKYRIMRENDERER_API void SkyrimRenderer_DestroyLiveFaceCam(uint32_t scene);
 
+// ---- Equipment & picking (API 10) ----
+//
+// Held items: weapons (WEAP: swords, daggers, axes, maces, two-handers, bows,
+// crossbows, staffs), torches (LIGH), ammo (AMMO: the quiver model) and
+// shields (ARMO with the shield slot, 39). The 3rd-person world model is used.
+// Weapons, torches and ammo hang rigidly from a skeleton node and follow the
+// pose and animation:
+//   drawn     right hand -> "WEAPON", left hand -> "SHIELD" (bows are held in
+//             the left hand: "SHIELD"; crossbows in the right: "WEAPON")
+//   sheathed  "WeaponSword" / "WeaponDagger" / "WeaponAxe" / "WeaponMace" /
+//             "WeaponBack" (two-handers) / "WeaponBow" / "WeaponStaff" /
+//             "WeaponCrossBow"; left-hand weapons try the "...Left" nodes
+//             (XP32-style skeletons) first. Missing nodes fall back to the
+//             nearest vanilla node, then the hand or pelvis bone.
+//   scabbard  shapes under the weapon NIF's "Scb" node stay on the sheath
+//             node while the weapon is drawn, as in game.
+//   torch     "SHIELD" (left hand), drawn or not.  ammo  "QUIVER" ("BOLT"
+//             first for bolts).
+// Shields are armor: skinned to "SHIELD" like any armor addon and listed by
+// GetEquippedItems; EquipWeapon replaces the armor in the shield slot.
+// A two-handed weapon (two-handed sword/axe, bow, crossbow) takes both hands.
+// Held items survive EquipOutfit / RebuildWithCurrentOutfit. EquipItem and
+// EquipOutfit also accept WEAP / LIGH / AMMO FormIDs: EquipItem puts them in
+// the right hand (torches left) in the current drawn state; EquipOutfit with
+// replaceAll and any held-item FormIDs in the list replaces the held items.
+// Head previews (LoadActorHead) refuse all of this.
+
+#define SKYRIMRENDERER_HAND_RIGHT 0u
+#define SKYRIMRENDERER_HAND_LEFT  1u
+
+// Equip a held item. hand: SKYRIMRENDERER_HAND_* (ignored for torches, ammo,
+// shields and two-handed weapons). drawn: 1 = in hand, 0 = sheathed; applies
+// to every held weapon of the actor (they are drawn or sheathed together).
+// Returns a Result (0 = success, 6 = InvalidParameter for other form types).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(
+    uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn);
+
+// Remove a held item (or a shield). formID 0 removes every held item (not the
+// shield). Returns a Result.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_UnequipWeapon(uint32_t actor, uint32_t formID);
+
+// Draw (1) or sheathe (0) every held weapon. Cheap: no reload.
+SKYRIMRENDERER_API void SkyrimRenderer_SetWeaponsDrawn(uint32_t actor, int32_t drawn);
+
+// Held items (weapons, torch, ammo; not shields). Writes up to maxCount
+// FormIDs and, when out_hands is not NULL, each item's hand
+// (SKYRIMRENDERER_HAND_*, 2 = both, 3 = none for ammo). Returns the count written.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeldItems(
+    uint32_t actor, uint32_t* out_formIDs, uint32_t* out_hands, uint32_t maxCount);
+
+// --- Picking ----------------------------------------------------------------
+//
+// Which mesh is under a pixel of the scene's render target (x, y in
+// render-target pixels, origin top-left, as GetSceneTexture / ReadbackPixels
+// see them). An ID pass (R32_UINT, its own depth, never multisampled) draws
+// the scene's meshes with the current camera and pose, honouring alpha-test
+// cutouts (blended hair counts where its alpha is >= 0.5); one texel is read
+// back. Nothing is drawn or allocated until the first pick or highlight.
+
+// What the hit mesh belongs to (SkyrimRenderer_PickResult::kind).
+#define SKYRIMRENDERER_PICK_NONE      0u  // a scene mesh (LoadMesh) or unknown
+#define SKYRIMRENDERER_PICK_BODY      1u  // skin: body, hands, feet, head / FaceGen
+#define SKYRIMRENDERER_PICK_HEADPART  2u  // a separate head part; formID = BGSHeadPart
+#define SKYRIMRENDERER_PICK_ARMOR     3u  // formID = ARMO (shields too), slotMask = its ARMA slots
+#define SKYRIMRENDERER_PICK_WEAPON    4u  // formID = WEAP
+#define SKYRIMRENDERER_PICK_TORCH     5u  // formID = LIGH
+#define SKYRIMRENDERER_PICK_AMMO      6u  // formID = AMMO
+
+// SkyrimRenderer_PickResult::flags
+#define SKYRIMRENDERER_PICKFLAG_SCABBARD 0x1u  // the weapon's scabbard
+
+struct SkyrimRenderer_PickResult {
+    uint32_t structSize;    // in: sizeof(SkyrimRenderer_PickResult)
+    int32_t  hit;           // 1 when a mesh covers the pixel
+    uint32_t x, y;          // the pixel asked for
+    uint32_t actor;         // actor handle the mesh belongs to, 0 for scene meshes
+    uint32_t formID;        // see SKYRIMRENDERER_PICK_*; 0 for body skin / scene meshes
+    uint32_t slotMask;      // biped slot bits (bit 0 = slot 30); body parts: their slot
+    uint32_t kind;          // SKYRIMRENDERER_PICK_*
+    uint32_t flags;         // SKYRIMRENDERER_PICKFLAG_*
+    uint32_t meshIndex;     // index in the scene's mesh list at pick time
+    char     shapeName[128];  // NIF shape name
+};
+
+// Synchronous pick. Renders the ID pass and waits for the one texel, so call
+// it where you would call RenderToTexture: on the thread that renders (the
+// game's main thread inside the frame, a per-frame callback, a Tick task).
+// Fills out (out->structSize must be set). Returns 1 on a hit, 0 for
+// background / bad handle / out of bounds.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PickAt(
+    uint32_t scene, uint32_t x, uint32_t y, SkyrimRenderer_PickResult* out);
+
+// Asynchronous pick, callable from any thread (e.g. UI mouse-move handlers).
+// Queues the pixel (a newer request replaces an unfinished one) and a render
+// of the scene; the ID pass runs with that render and the texel is collected
+// on the following Tick, without a GPU stall.
+SKYRIMRENDERER_API void SkyrimRenderer_RequestPick(uint32_t scene, uint32_t x, uint32_t y);
+
+// Latest finished async pick. Returns 1 and fills out (structSize set) when a
+// result is ready that has not been returned yet, 0 otherwise.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetPickResult(uint32_t scene, SkyrimRenderer_PickResult* out);
+
+// --- Highlight --------------------------------------------------------------
+//
+// Mark an actor's item on screen. Drawn on top of the shaded scene from the
+// ID pass (after post-process, before the frame overlay), so it looks the same
+// on the native and the Community Shaders path. Only the visible part of the
+// item is marked (occluded parts are not drawn through).
+
+#define SKYRIMRENDERER_HIGHLIGHT_OUTLINE 0x1u  // outline around the item's silhouette
+#define SKYRIMRENDERER_HIGHLIGHT_TINT    0x2u  // translucent fill: color.rgb at color.a
+#define SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS 0xFFFFFFFFu  // formID: every mesh of the actor
+
+// formID: an equipped ARMO / WEAP / LIGH / AMMO / head part form, 0 for the
+// body skin, or SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS. color: 0..1 RGBA written
+// to the target as-is (alpha = opacity; NULL = amber). mode:
+// SKYRIMRENDERER_HIGHLIGHT_* bits (0 = OUTLINE). outlineWidth: pixels, 1..4
+// (0 = 2). Calling again for the same actor + formID replaces it. Up to 16
+// highlights per scene. Set / Clear queue a render of the actor's scene
+// (RequestRender). Returns 1/0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
+    uint32_t actor, uint32_t formID, const SkyrimRenderer_Color* color, uint32_t mode, uint32_t outlineWidth);
+
+// Remove a highlight (SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS removes every
+// highlight of the actor).
+SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID);
+
 } // extern "C"

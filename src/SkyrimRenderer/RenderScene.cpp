@@ -122,6 +122,10 @@ RenderScene::RenderScene(uint32_t width, uint32_t height, const std::filesystem:
     // Ground shadow / self-shadow / SSAO / debug views (all off; shaders compile on first use)
     sceneLook_ = std::make_unique<SceneLook>(device_, shaderDir);
 
+    // Picking / highlight: GPU objects are made on first use
+    picking_ = std::make_unique<PickingState>();
+    picking_->renderer.Initialize(device_, shaderDir);
+
     // Community Shaders path (process-wide; no-op unless opted in and CS present)
     CSRenderPath::Get().Initialize(device_, shaderDir);
 
@@ -147,6 +151,7 @@ RenderScene::~RenderScene() {
     renderTarget_.Release();
     shader_.Release();
     meshRenderer_.reset();
+    picking_.reset();
     loadedMeshes_.clear();
     sceneRoot_ = nullptr;
 
@@ -191,6 +196,7 @@ RenderScene::RenderScene(RenderScene&& other) noexcept {
     postProcessOrder_ = std::move(other.postProcessOrder_);
     ppStartTime_ = other.ppStartTime_;
     ppFrameCount_ = other.ppFrameCount_;
+    picking_ = std::move(other.picking_);
 
     other.device_ = nullptr;
     other.context_ = nullptr;
@@ -235,6 +241,7 @@ RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
         postProcessOrder_ = std::move(other.postProcessOrder_);
         ppStartTime_ = other.ppStartTime_;
         ppFrameCount_ = other.ppFrameCount_;
+        picking_ = std::move(other.picking_);
 
         other.device_ = nullptr;
         other.context_ = nullptr;
@@ -1300,6 +1307,9 @@ Result RenderScene::Render(bool saveState) {
         ExecutePostProcessStack(postProcessOrder_, ppSRVs_[1].Get(), renderTarget_.GetRTV());
         ppFrameCount_++;
     }
+
+    // ── Picking ID pass / highlight overlay (only when asked for) ────────
+    RenderPickingPasses();
 
     // ── Frame overlay: draw frame with depth test ────────────────────────
     if (overlayActive) {

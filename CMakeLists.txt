@@ -81,6 +81,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/DebugViewPass.h
     include/SkyrimRenderer/FaceMorphs.h
     include/SkyrimRenderer/LiveMirror.h
+    include/SkyrimRenderer/PickRenderer.h
+    include/SkyrimRenderer/RigidMeshLoader.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -118,6 +120,11 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/FaceMorphs.cpp
     src/SkyrimRenderer/LiveMirror.cpp
     src/SkyrimRenderer/LiveMirrorAPI.cpp
+    src/SkyrimRenderer/ActorPreviewHeldItems.cpp
+    src/SkyrimRenderer/PickRenderer.cpp
+    src/SkyrimRenderer/RenderScenePicking.cpp
+    src/SkyrimRenderer/RigidMeshLoader.cpp
+    src/SkyrimRenderer/SceneManagerPicking.cpp
     src/SkyrimRenderer/WorkerPool.cpp
     src/SkyrimRenderer/SceneLook.cpp
     src/SkyrimRenderer/ShadowPass.cpp

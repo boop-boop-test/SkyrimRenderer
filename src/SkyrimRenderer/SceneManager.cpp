@@ -179,6 +179,9 @@ void SceneManager::Tick() {
         TickAnimations(dt);
     }
 
+    // Async picks copied by an earlier render: read the texel (no GPU wait)
+    CollectPicks();
+
     ProcessPendingRenders();
 }
 
