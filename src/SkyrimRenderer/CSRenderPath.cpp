@@ -625,7 +625,13 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
 
     // CS writes diffuse alpha even for opaque materials (the game's opaque
     // blend discards it). Our target is consumed with its alpha (texture mode
-    // promises opaque writes carry alpha 1), so take alpha from the blend factor.
+    // promises opaque writes carry alpha 1). A blend factor can't replace the
+    // source alpha (BLEND_FACTOR only scales it: As * 1 = As, which left
+    // see-through holes where alpha-tested hair / beards cover the face), so
+    // keep the larger of source and destination alpha: an opaque surface never
+    // lowers coverage, and over an opaque background or face it stays 1. Over
+    // a transparent background an alpha-tested pixel still gets its diffuse
+    // alpha; only the native shader can force exactly 1 (solidCoverage).
     Microsoft::WRL::ComPtr<ID3D11BlendState> savedBlend;
     FLOAT savedFactor[4]{};
     UINT savedMask = 0;
@@ -638,9 +644,9 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
             rt.SrcBlend = D3D11_BLEND_ONE;
             rt.DestBlend = D3D11_BLEND_ZERO;
             rt.BlendOp = D3D11_BLEND_OP_ADD;
-            rt.SrcBlendAlpha = D3D11_BLEND_BLEND_FACTOR;
-            rt.DestBlendAlpha = D3D11_BLEND_ZERO;
-            rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha = D3D11_BLEND_ONE;   // factors are ignored by MAX
+            rt.DestBlendAlpha = D3D11_BLEND_ONE;
+            rt.BlendOpAlpha = D3D11_BLEND_OP_MAX;
             rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
             device_->CreateBlendState(&desc, opaqueAlphaBlend_.GetAddressOf());
         }

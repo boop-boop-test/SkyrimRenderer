@@ -65,7 +65,8 @@ cbuffer PerFrame : register(b0) {
 cbuffer PerMesh : register(b1) {
     float4   materialParams;      // x = specStr, y = gloss, z = unused, w = alphaCutoff
     float4   tintColor;           // rgb = tint
-    uint4    materialFlags;       // x = shadingModel, y = shaderFlags, z = textureMask
+    uint4    materialFlags;       // x = shadingModel, y = shaderFlags, z = textureMask,
+                                  // w = 1 for opaque / alpha-tested draws: output alpha 1 (full coverage)
     float4   specularColor;       // xyz = vanilla SpecularColour, w = unused
     float4   lightingEffectParams; // x = softLightingRolloff, y = rimLightPower, z = backlightScale, w = envMapScale
     float4   emissiveParams;      // rgb = emissive colour x multiple x scene emissive scale (0 = none), w = unused
