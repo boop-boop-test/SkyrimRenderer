@@ -16,6 +16,7 @@
 #include <bit>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <thread>
 
@@ -719,11 +720,53 @@ void GpuWork::EnsureSamplers(ID3D11Device* device) {
     }
 }
 
+namespace {
+
+/// A 4x4 BGRA8 DDS: the placeholder file behind an engine texture.
+bool WritePlaceholderDDS(const std::filesystem::path& file) {
+    std::error_code ec;
+    if (std::filesystem::exists(file, ec)) return true;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    uint32_t header[32]{};
+    header[0] = 0x20534444;            // "DDS "
+    header[1] = 124;                   // header size
+    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8;  // caps, height, width, pixel format, pitch
+    header[3] = 4;                     // height
+    header[4] = 4;                     // width
+    header[5] = 16;                    // pitch
+    header[19] = 32;                   // pixel format size
+    header[20] = 0x1 | 0x40;           // alpha pixels, RGB
+    header[22] = 32;                   // bits per pixel
+    header[23] = 0x00FF0000;           // R
+    header[24] = 0x0000FF00;           // G
+    header[25] = 0x000000FF;           // B
+    header[26] = 0xFF000000;           // A
+    header[27] = 0x1000;               // caps: texture
+    uint32_t pixels[16];
+    std::fill(std::begin(pixels), std::end(pixels), 0xFF808080u);
+    std::ofstream out(file, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(pixels), sizeof(pixels));
+    return static_cast<bool>(out);
+}
+
+}  // namespace
+
 bool GpuWork::MakeEngineTexture(Texture& texture, uint32_t handle) {
-    // A unique path makes the engine hand out its own texture object; its
-    // renderer texture is then pointed at ours (see the header).
+    // The engine only hands out a private texture object for a file that
+    // exists (a missing path gets a shared fallback such as
+    // bsshader_defnormalmap). So: a tiny placeholder DDS under a unique name,
+    // loaded by the engine as any texture is (allocated, linked and later
+    // freed by the engine itself), then its renderer texture's D3D texture
+    // and view are swapped for the output's. When the last reference goes,
+    // the engine releases our D3D objects with its own Release calls.
     const auto id = std::format("{:08x}", handle);
     const auto path = std::format("textures\\skyrimrenderer\\gpu\\{}.dds", id);
+    const auto file = std::filesystem::path("Data") / "textures" / "skyrimrenderer" / "gpu" / (id + ".dds");
+    if (!WritePlaceholderDDS(file)) {
+        texture.Fail(std::format("engine texture: cannot write the placeholder {}", file.string()));
+        return false;
+    }
     RE::NiPointer<RE::NiTexture> tex;
     RE::BSShaderManager::GetTexture(path.c_str(), true, tex, false);
     if (!tex) {
@@ -739,25 +782,28 @@ bool GpuWork::MakeEngineTexture(Texture& texture, uint32_t handle) {
     std::string name = source->name.c_str() ? source->name.c_str() : "";
     std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (name.find(id) == std::string::npos) {
-        // A shared stand-in (e.g. the missing-texture object): never retarget it.
+        // A shared stand-in (e.g. the missing-texture object): never touch it.
         texture.Fail(std::format("engine texture: the engine shared '{}' instead of a private object", name));
         return false;
     }
-    auto* rt = RE::malloc<RE::BSGraphics::Texture>();
-    if (!rt) {
-        texture.Fail("engine texture: out of memory");
+    auto* rt = source->rendererTexture;
+    if (!rt || !rt->texture || !rt->resourceView) {
+        texture.Fail("engine texture: the placeholder did not load (no renderer texture)");
         return false;
     }
-    std::memset(rt, 0, sizeof(*rt));
+    // Swap in place: the engine keeps its own BSGraphics::Texture and frees it
+    // as usual; it just holds (and later releases) our D3D objects instead.
+    ID3D11Resource* oldTexture = rt->texture;
+    ID3D11ShaderResourceView* oldView = rt->resourceView;
     texture.resource->AddRef();
     texture.srv->AddRef();
     rt->texture = texture.resource.Get();
     rt->resourceView = texture.srv.Get();
-    rt->refCount = 1;
-    source->rendererTexture = rt;  // the engine's stand-in, if any, is left alone
+    if (oldView) oldView->Release();
+    if (oldTexture) oldTexture->Release();
     texture.engine = RE::NiPointer<RE::NiSourceTexture>(source);
-    SKSE::log::info("[GpuWork] engine texture {} wraps output {} ({}x{}, {} mips)", path, handle, texture.width,
-                    texture.height, texture.mips);
+    SKSE::log::info("[GpuWork] engine texture {} wraps output {} ({}x{}, {} mips; refs {})", path, handle,
+                    texture.width, texture.height, texture.mips, source->GetRefCount());
     return true;
 }
 

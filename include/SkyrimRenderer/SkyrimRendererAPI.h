@@ -1397,12 +1397,15 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint
 // verified in game (NTJH issue 165, gate 1): engineTexture stays NULL and the
 // output FAILED with the reason when the engine does not hand out a private
 // texture object.
-//   - The renderer asks the engine for a texture object under a unique path
-//     (textures\skyrimrenderer\gpu\<handle>.dds) and points its renderer
-//     texture at the output. That renderer texture holds its OWN reference
-//     on the D3D texture and SRV, released by the engine when the last
-//     NiPointer to the NiSourceTexture goes: a material that still holds it
-//     never samples a freed resource.
+//   - The engine only hands out a private texture object for a file that
+//     exists, so the renderer writes a 4x4 placeholder DDS under a unique name
+//     (Data\textures\skyrimrenderer\gpu\<handle>.dds; under MO2 it lands in
+//     overwrite), lets the engine load it like any texture, and swaps the
+//     D3D texture and view inside the engine's renderer texture for the
+//     output's. The engine owns and frees everything as usual; its renderer
+//     texture holds its OWN reference on our D3D texture and view, released
+//     when the last NiPointer to the NiSourceTexture goes, so a material that
+//     still holds it never samples a freed resource.
 //   - The renderer holds one NiPointer until the instance is destroyed (or
 //     its mod shuts down). Put the original texture back in every material
 //     slot you replaced BEFORE that: nothing is restored for you. A material
