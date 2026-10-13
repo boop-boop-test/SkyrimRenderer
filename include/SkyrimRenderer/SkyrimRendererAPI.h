@@ -562,8 +562,10 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_
 // rest + offset, normals, the GPU vertex image), and the immediate context is
 // saved and restored once around all the draws. Uploads and draws stay on the
 // calling thread, in list order. Duplicate handles render once.
-// Returns a Result: 0 when every scene rendered; otherwise the first failure
-// (an invalid handle is skipped and reported as InvalidHandle, 9 = DeviceLost).
+// Returns a Result: 0 when every scene rendered; otherwise the failure of the
+// first failing entry in list order. Every valid scene still renders; an
+// invalid handle is skipped and counts as InvalidHandle at its position
+// (9 = DeviceLost).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count);
 
 // Timings of a scene's last render, from any render path (RenderToTexture,

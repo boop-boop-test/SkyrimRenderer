@@ -386,6 +386,7 @@ private:
         std::vector<float> restTangents;   // xyzw per vertex, as loaded
         std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
         bool pending = false;              // prepared, not yet uploaded
+        bool stale = false;                // a prep threw after `uploaded` changed: redo it
     };
     std::vector<DrivenShape> drivenShapes_;
     uint32_t headDriveFlags_ = 0;

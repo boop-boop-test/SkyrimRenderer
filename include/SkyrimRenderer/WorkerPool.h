@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -22,7 +23,9 @@ public:
     static WorkerPool& Get();
 
     /// Run fn(i) for i in [0, count) across the pool and the caller; returns
-    /// when every call has finished.
+    /// when every call has finished. A call that throws is logged and the rest
+    /// still run; the first exception is then rethrown on the caller (inline
+    /// or pooled alike).
     void ParallelFor(uint32_t count, const std::function<void(uint32_t)>& fn);
 
     uint32_t WorkerCount() const { return static_cast<uint32_t>(workers_.size()); }
@@ -44,6 +47,8 @@ private:
     std::atomic<uint32_t> next_{0};
     uint32_t slots_ = 0;       // workers still wanted for the current job
     uint32_t active_ = 0;      // workers inside the current job
+    std::mutex errorMutex_;
+    std::exception_ptr error_;  // first throw of the current job
 };
 
 } // namespace SkyrimRenderer

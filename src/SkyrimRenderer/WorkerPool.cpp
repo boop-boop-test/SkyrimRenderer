@@ -3,6 +3,8 @@
 #include <SKSE/SKSE.h>
 
 #include <algorithm>
+#include <exception>
+#include <utility>
 #include <windows.h>
 
 namespace SkyrimRenderer {
@@ -11,6 +13,25 @@ namespace {
 // Leave two cores to the engine (main + render threads), at most six workers.
 constexpr uint32_t kMaxWorkers = 6;
 constexpr uint32_t kReservedCores = 2;
+
+// fn(i) with a throw logged and the first one kept for the caller, so every
+// item runs whether the job is spread over the pool or run inline.
+void RunItem(const std::function<void(uint32_t)>& fn, uint32_t i, std::mutex& errorMutex,
+             std::exception_ptr& error) {
+    std::exception_ptr thrown;
+    try {
+        fn(i);
+        return;
+    } catch (const std::exception& e) {
+        SKSE::log::error("[SkyrimRenderer] Worker job {} threw: {}", i, e.what());
+        thrown = std::current_exception();
+    } catch (...) {
+        SKSE::log::error("[SkyrimRenderer] Worker job {} threw", i);
+        thrown = std::current_exception();
+    }
+    std::lock_guard lock(errorMutex);
+    if (!error) error = std::move(thrown);
+}
 }
 
 WorkerPool& WorkerPool::Get() {
@@ -35,13 +56,7 @@ void WorkerPool::RunItems() {
     for (;;) {
         const uint32_t i = next_.fetch_add(1, std::memory_order_relaxed);
         if (i >= count_) return;
-        try {
-            (*fn_)(i);
-        } catch (const std::exception& e) {
-            SKSE::log::error("[SkyrimRenderer] Worker job {} threw: {}", i, e.what());
-        } catch (...) {
-            SKSE::log::error("[SkyrimRenderer] Worker job {} threw", i);
-        }
+        RunItem(*fn_, i, errorMutex_, error_);
     }
 }
 
@@ -62,7 +77,10 @@ void WorkerPool::ParallelFor(uint32_t count, const std::function<void(uint32_t)>
     if (count == 0) return;
     bool idle = false;
     if (count == 1 || workers_.empty() || !busy_.compare_exchange_strong(idle, true)) {
-        for (uint32_t i = 0; i < count; ++i) fn(i);
+        std::mutex errorMutex;
+        std::exception_ptr error;
+        for (uint32_t i = 0; i < count; ++i) RunItem(fn, i, errorMutex, error);
+        if (error) std::rethrow_exception(error);
         return;
     }
 
@@ -87,7 +105,13 @@ void WorkerPool::ParallelFor(uint32_t count, const std::function<void(uint32_t)>
         fn_ = nullptr;
         count_ = 0;
     }
+    std::exception_ptr error;
+    {
+        std::lock_guard lock(errorMutex_);
+        error = std::exchange(error_, nullptr);
+    }
     busy_.store(false);
+    if (error) std::rethrow_exception(error);
 }
 
 } // namespace SkyrimRenderer

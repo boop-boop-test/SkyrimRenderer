@@ -422,7 +422,9 @@ private:
 
     /// GuardedRender for several scenes (see RenderToTextures). Every render
     /// path goes through it, so each records RenderScene::RenderStats.
-    Result GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where);
+    /// perScene (optional) gets each listed scene's own result, in list order.
+    Result GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where,
+                              std::vector<Result>* perScene = nullptr);
 
     std::atomic<uint32_t> renderCallSerial_{0};  // RenderStats::callSerial
 

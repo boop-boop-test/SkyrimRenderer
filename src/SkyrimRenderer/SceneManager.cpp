@@ -343,9 +343,14 @@ Result SceneManager::GuardedRender(RenderScene* scene, const char* where) {
     return GuardedRenderBatch({scene}, where);
 }
 
-Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where) {
+Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where,
+                                        std::vector<Result>* perScene) {
+    if (perScene) perScene->assign(scenes.size(), Result::Success);
     if (scenes.empty()) return Result::InvalidHandle;
-    if (IsDeviceLost()) return Result::DeviceLost;
+    if (IsDeviceLost()) {
+        if (perScene) perScene->assign(scenes.size(), Result::DeviceLost);
+        return Result::DeviceLost;
+    }
 
     using Clock = std::chrono::steady_clock;
     auto ms = [](Clock::duration d) { return std::chrono::duration<float, std::milli>(d).count(); };
@@ -380,11 +385,17 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     }
 
     const auto prepStart = Clock::now();
-    WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
-        const auto t0 = Clock::now();
-        jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
-        jobs[j].ms = ms(Clock::now() - t0);
-    });
+    try {
+        WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
+            const auto t0 = Clock::now();
+            jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
+            jobs[j].ms = ms(Clock::now() - t0);
+        });
+    } catch (...) {
+        // Already logged per job. The other shapes still upload; a failed one
+        // stays stale (DrivenShape::stale) and is prepared again next render.
+        SKSE::log::warn("[SkyrimRenderer] {}: driven-head prep failed; retrying those shapes next render", where);
+    }
     const float callPrepMs = ms(Clock::now() - prepStart);
 
     std::vector<RenderScene::RenderStats> stats(scenes.size());
@@ -425,6 +436,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
             const auto t0 = Clock::now();
             const Result r = scenes[i]->Render(!batched);
             stats[i].renderMs = ms(Clock::now() - t0);
+            if (perScene) (*perScene)[i] = r;
             if (Failed(r) && !Failed(result)) result = r;
         }
     }
@@ -438,6 +450,11 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
         stats[i].callPrepMs = callPrepMs;
         stats[i].callMs = callMs;
         scenes[i]->SetLastRenderStats(stats[i]);
+    }
+    if (!healthy && perScene) {
+        for (auto& r : *perScene) {
+            if (!Failed(r)) r = Result::DeviceLost;
+        }
     }
     return healthy ? result : Result::DeviceLost;
 }
@@ -776,20 +793,27 @@ Result SceneManager::RenderToTexture(SceneHandle scene) {
 
 Result SceneManager::RenderToTextures(const SceneHandle* scenes, uint32_t count) {
     if (!scenes || count == 0) return Result::InvalidHandle;
-    Result missing = Result::Success;
+    // Every valid scene renders; the result is the first failure in input
+    // order (an invalid handle at its own position, as the API documents).
+    constexpr size_t kInvalid = SIZE_MAX;
     std::vector<RenderScene*> list;
+    std::vector<size_t> slot(count, kInvalid);  // input position -> index in list
     list.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         auto* s = GetScene(scenes[i]);
-        if (!s) {
-            missing = Result::InvalidHandle;
-            continue;
-        }
-        if (std::find(list.begin(), list.end(), s) == list.end()) list.push_back(s);
+        if (!s) continue;
+        const auto it = std::find(list.begin(), list.end(), s);
+        slot[i] = static_cast<size_t>(it - list.begin());
+        if (it == list.end()) list.push_back(s);
     }
-    if (list.empty()) return missing;
-    const Result result = GuardedRenderBatch(list, "RenderToTextures");
-    return Failed(result) ? result : missing;
+    if (list.empty()) return Result::InvalidHandle;
+    std::vector<Result> perScene;
+    GuardedRenderBatch(list, "RenderToTextures", &perScene);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Result r = slot[i] == kInvalid ? Result::InvalidHandle : perScene[slot[i]];
+        if (Failed(r)) return r;
+    }
+    return Result::Success;
 }
 
 Result SceneManager::RenderSceneInto(SceneHandle scene, RenderTargetManager& target,

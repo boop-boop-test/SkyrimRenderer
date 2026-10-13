@@ -1890,7 +1890,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
     const bool offsets = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
     const bool recompute = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_RECOMPUTE_NORMALS) != 0;
 
-    bool changed = headDriveDirty_;
+    bool changed = headDriveDirty_ || ds.stale;
     if (!changed) {
         if (offsets) {
             for (size_t k = 0; k < count; ++k) {
@@ -1902,6 +1902,10 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
     }
     if (!changed) return 0;
 
+    // Cleared on success only: if anything below throws (scratch / staging
+    // allocation), `uploaded` no longer matches the GPU, and the next change
+    // check would otherwise see the new positions as already sent.
+    ds.stale = true;
     for (size_t k = 0; k < count; ++k) {
         ds.uploaded[k] = offsets ? ds.rest[k] + ds.positions[k] : ds.positions[k];
     }
@@ -1922,6 +1926,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
         ds.staged.clear();
     }
     ds.pending = true;
+    ds.stale = false;
     return static_cast<uint32_t>(n);
 }
 
