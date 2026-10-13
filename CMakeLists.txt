@@ -79,6 +79,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/ShadowPass.h
     include/SkyrimRenderer/SSAOPass.h
     include/SkyrimRenderer/DebugViewPass.h
+    include/SkyrimRenderer/FaceMorphs.h
+    include/SkyrimRenderer/LiveMirror.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -113,6 +115,9 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/ExportEncoders.cpp
     src/SkyrimRenderer/TurntableExporter.cpp
     src/SkyrimRenderer/ItemPreview.cpp
+    src/SkyrimRenderer/FaceMorphs.cpp
+    src/SkyrimRenderer/LiveMirror.cpp
+    src/SkyrimRenderer/LiveMirrorAPI.cpp
     src/SkyrimRenderer/WorkerPool.cpp
     src/SkyrimRenderer/SceneLook.cpp
     src/SkyrimRenderer/ShadowPass.cpp

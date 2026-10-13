@@ -24,6 +24,8 @@
 #include "SkyrimRenderer/SkyPatcherService.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/HKXLoader.h"
+#include "SkyrimRenderer/FaceMorphs.h"
+#include "SkyrimRenderer/LiveMirror.h"
 
 namespace SkyrimRenderer {
 
@@ -408,9 +410,10 @@ Result ActorPreview::CloneFromLoaded(RE::Actor* actor) {
     // Clear any previously loaded meshes
     scene_.ClearLoadedMeshes();
 
-    // Collect base outfit from biped data
+    // Collect base outfit from the third-person biped (GetCurrentBiped is the
+    // first-person one while the player is in first person: arms only)
     baseOutfit_.clear();
-    const auto& biped = actor->GetCurrentBiped();
+    const auto& biped = actor->GetBiped(false);
     if (biped) {
         for (uint32_t slot = 0; slot < 32; ++slot) {
             auto& bipedObj = biped->objects[slot];
@@ -491,6 +494,7 @@ bool ActorPreview::RestsOnNifBindPose() const {
 void ActorPreview::ResetGPUSkinningPose() {
     if (RestsOnNifBindPose() && ApplyNifBindPose()) return;
     gpuPose_.clear();
+    ++poseGeneration_;
     scene_.SetGPUSkinningPose(nullptr);
 }
 
@@ -1268,6 +1272,7 @@ void ActorPreview::ApplyPoseGPUSkinning(const BonePoseMap& pose) {
     }
 
     scene_.SetGPUSkinningPose(&gpuPose_);
+    ++poseGeneration_;  // gpuPose_ was reassigned: live mirror slots are stale
 }
 
 void ActorPreview::ApplyPoseToMeshes(const BonePoseMap& pose) {
@@ -2962,6 +2967,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     }
 
     if (headOnly_) BuildDrivenHead(partsByMesh);
+    ++meshGeneration_;  // mesh indices changed: expression / live mirror bindings are stale
 
     auto rebuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - rebuildStart).count();

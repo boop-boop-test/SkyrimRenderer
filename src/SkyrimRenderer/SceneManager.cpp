@@ -5,6 +5,7 @@
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TextureLoader.h"
 #include "SkyrimRenderer/WorkerPool.h"
+#include "SkyrimRenderer/SkyrimRendererAPI.h"
 
 #include <RE/R/Renderer.h>
 #include <SKSE/SKSE.h>
@@ -173,6 +174,7 @@ void SceneManager::Tick() {
         dt = std::min(dt, 0.1f);  // cap at 100ms to avoid huge jumps on hitches
     }
     lastFrameTime_ = now;
+    TickLiveMirrors(dt);  // before animations: a POSE mirror drops the preview's clip
     if (dt > 0.0f) {
         TickAnimations(dt);
     }
@@ -395,6 +397,19 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
         st.uploadMs += ms(Clock::now() - t0);
     }
     headLocks.clear();
+
+    // Expression morphs (SetFaceMorph, live mirror FACE): upload the changed ones.
+    std::vector<ActorPreview*> faces;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& [id, actor] : actors_) {
+            if (!actor || !actor->HasFaceMorphs()) continue;
+            if (std::find(scenes.begin(), scenes.end(), &actor->GetScene()) != scenes.end()) {
+                faces.push_back(actor.get());
+            }
+        }
+    }
+    for (auto* actor : faces) actor->FlushFaceMorphs();
 
     // One save / restore of the immediate context for a batch; a single scene
     // keeps its own inside Render, as before.
@@ -969,6 +984,45 @@ ActorHandle SceneManager::LoadActorHead(SceneHandle scene, RE::FormID formID) {
     actorToScene_[id] = sceneId;
     SKSE::log::info("[SkyrimRenderer] Created head preview {} for 0x{:X} in scene {}", id, formID, sceneId);
     return static_cast<ActorHandle>(id);
+}
+
+ActorHandle SceneManager::LoadActorFromReference(SceneHandle scene, RE::FormID refFormID, uint32_t mirrorFlags) {
+    const ActorHandle handle = LoadActorPreview(scene, refFormID);
+    auto* preview = GetActorPreview(handle);
+    if (!preview) return handle;
+
+    // One snapshot of the live pose and expression, whatever the flags (pinned
+    // and scaled as the mirror will be, so camera presets framed on it hold).
+    auto* form = RE::TESForm::LookupByID(refFormID);
+    auto* live = form ? form->As<RE::Actor>() : nullptr;
+    const uint32_t snapshotFlags = SKYRIMRENDERER_MIRROR_POSE | SKYRIMRENDERER_MIRROR_FACE |
+        (mirrorFlags & (SKYRIMRENDERER_MIRROR_PIN_NECK | SKYRIMRENDERER_MIRROR_LIVE_SCALE));
+    if (live && live->Is3DLoaded() && Succeeded(preview->SetLiveMirror(refFormID, snapshotFlags))) {
+        preview->TickLiveMirror(0.0f);
+    }
+    // Then keep mirroring with the caller's flags (0 stops; the snapshot stays).
+    preview->SetLiveMirror(refFormID, mirrorFlags);
+    SKSE::log::info("[SkyrimRenderer] Actor {} recreated from reference 0x{:X} (mirror flags 0x{:X})",
+                    static_cast<uint32_t>(handle), refFormID, mirrorFlags);
+    return handle;
+}
+
+void SceneManager::TickLiveMirrors(float deltaSeconds) {
+    std::lock_guard lock(mutex_);
+    for (auto& [id, actor] : actors_) {
+        if (!actor || !actor->HasLiveMirror() || !actor->TickLiveMirror(deltaSeconds)) continue;
+        auto sceneIt = actorToScene_.find(id);
+        if (sceneIt == actorToScene_.end()) continue;
+        // Only scenes somebody shows: a plain scene would render to readback.
+        auto s = scenes_.find(sceneIt->second);
+        const bool shown = compositeRects_.contains(sceneIt->second) ||
+                           (s != scenes_.end() && s->second && s->second->IsTextureMode());
+        if (!shown) continue;
+        const auto handle = static_cast<SceneHandle>(sceneIt->second);
+        if (std::find(pendingRenders_.begin(), pendingRenders_.end(), handle) == pendingRenders_.end()) {
+            pendingRenders_.push_back(handle);
+        }
+    }
 }
 
 ActorPreview* SceneManager::GetActorPreview(ActorHandle handle) {

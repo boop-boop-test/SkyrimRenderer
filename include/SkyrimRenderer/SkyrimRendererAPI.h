@@ -821,4 +821,136 @@ struct SkyrimRenderer_SceneLookState {
 // scene or a too-small struct.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out);
 
+// ---- Live mirror (API 10) ----
+// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+//
+// Read a live in-game actor (the player or any loaded NPC) and recreate it in
+// a preview, then keep the preview in step with it every frame: skeleton pose
+// (head nods, idles, gestures), facial expression and worn armor. The use case
+// is a picture-in-picture "face cam": in first person the player cannot see
+// their own head gestures or expressions, the preview can. See
+// docs/LiveMirror.md for the design and the first-person caveats.
+//
+// Threading: every call here is game main thread only (they read live game
+// objects). The mirror itself runs in SceneManager's per-frame work: the
+// Present hook, or SkyrimRenderer_Tick for texture-mode consumers. A mirrored
+// scene that is composited (SetCompositeRect) or in texture mode is re-rendered
+// by the mirror whenever the live actor changed; other scenes are not.
+//
+// Expressions (SetFaceMorph & co.) work on any actor preview, live or not:
+// they add the head parts' expression tri morphs ("Morphs" tri,
+// HeadShapeInfo.triMorph) on top of the head's positions, as the engine does.
+
+// Mirror flags (SetLiveMirror, LoadActorFromReference, CreateLiveFaceCam).
+#define SKYRIMRENDERER_MIRROR_POSE           0x01u  // copy the live third-person skeleton every frame
+#define SKYRIMRENDERER_MIRROR_FACE           0x02u  // live expression / modifier / phoneme values -> tri morphs
+#define SKYRIMRENDERER_MIRROR_EQUIPMENT      0x04u  // rebuild when the live worn armor changes (debounced)
+#define SKYRIMRENDERER_MIRROR_FACE_VERTICES  0x08u  // player only: copy the live face vertices (30 Hz) for the
+                                                    // face meshes bound to them (RefreshLiveFace path); with
+                                                    // FACE too, tri morphs drive the other head parts
+#define SKYRIMRENDERER_MIRROR_PIN_NECK       0x10u  // keep the neck at its bind-pose position (translation
+                                                    // only) so walking, sitting or sneaking stays in frame
+#define SKYRIMRENDERER_MIRROR_LIVE_SCALE     0x20u  // take bone scales from the live skeleton too (default:
+                                                    // the skeleton NIF's; head-hiding first-person mods
+                                                    // scale the live head to zero)
+#define SKYRIMRENDERER_MIRROR_DEFAULT \
+    (SKYRIMRENDERER_MIRROR_POSE | SKYRIMRENDERER_MIRROR_FACE | SKYRIMRENDERER_MIRROR_EQUIPMENT | SKYRIMRENDERER_MIRROR_PIN_NECK)
+
+// Face morph groups (SetFaceMorph): the engine's BSFaceGenKeyframe slots.
+//   EXPRESSION (17): 0 DialogueAnger 1 DialogueFear 2 DialogueHappy 3 DialogueSad
+//     4 DialogueSurprise 5 DialoguePuzzled 6 DialogueDisgusted 7 MoodNeutral
+//     8 MoodAnger 9 MoodFear 10 MoodHappy 11 MoodSad 12 MoodSurprise
+//     13 MoodPuzzled 14 MoodDisgusted 15 CombatAnger 16 CombatShout
+//   MODIFIER (17): 0 BlinkLeft 1 BlinkRight 2 BrowDownLeft 3 BrowDownRight
+//     4 BrowInLeft 5 BrowInRight 6 BrowUpLeft 7 BrowUpRight 8 LookDown 9 LookLeft
+//     10 LookRight 11 LookUp 12 SquintLeft 13 SquintRight 14 HeadPitch
+//     15 HeadRoll 16 HeadYaw
+//   PHONEME (16): 0 Aah 1 BigAah 2 BMP 3 ChJSh 4 DST 5 Eee 6 Eh 7 FV 8 I 9 K
+//     10 N 11 Oh 12 OohQ 13 R 14 Th 15 W
+//   CUSTOM (1): 0 SkinnyMorph
+// A slot drives the tri morph of the same name in every head part that has
+// one (HeadPitch / HeadRoll / HeadYaw and MoodNeutral usually have none).
+// Weights are 0..1 like the engine's (MFG console values / 100).
+#define SKYRIMRENDERER_FACE_EXPRESSION 0u
+#define SKYRIMRENDERER_FACE_MODIFIER   1u
+#define SKYRIMRENDERER_FACE_PHONEME    2u
+#define SKYRIMRENDERER_FACE_CUSTOM     3u
+
+// CreateLiveFaceCam flags, on top of the SKYRIMRENDERER_MIRROR_* bits.
+#define SKYRIMRENDERER_FACECAM_TEXTURE_MODE  0x00010000u  // texture-mode scene, no composite rect / Present hook
+#define SKYRIMRENDERER_FACECAM_FACE_CLOSE    0x00020000u  // camera preset FaceClose (default HeadShot)
+#define SKYRIMRENDERER_FACECAM_UPPER_BODY    0x00040000u  // camera preset UpperBody
+
+struct SkyrimRenderer_LiveMirrorStatus {
+    uint32_t structSize;              // in: sizeof(SkyrimRenderer_LiveMirrorStatus)
+    uint32_t refFormID;               // mirrored reference, 0 when no mirror
+    uint32_t flags;                   // SKYRIMRENDERER_MIRROR_*
+    int32_t  liveLoaded;              // the reference's third-person 3D is loaded
+    int32_t  firstPerson;             // the reference is the player and the camera is first person
+    uint32_t boundBones;              // live nodes copied onto preview bones
+    uint32_t derivedBones;            // preview bones following a mirrored parent (no live node)
+    uint32_t faceMorphMeshes;         // head meshes driven by tri morphs
+    uint32_t liveFaceMeshes;          // head meshes fed live vertices (FACE_VERTICES)
+    int32_t  faceSourceFound;         // the live actor has face animation data
+    uint32_t frames;                  // mirror updates so far
+    uint32_t poseChanges;             // updates in which a mirrored bone moved
+    uint32_t faceChanges;             // updates in which a face value or vertex changed
+    uint32_t equipmentRebuilds;
+    float    secondsSincePoseChange;  // -1 before the first change
+    float    secondsSinceFaceChange;  // -1 before the first change
+};
+
+// Load a preview of a live actor reference (the player 0x14 or a loaded NPC;
+// an unloaded one falls back to its base NPC like LoadActorPreview): race,
+// sex, weight, the third-person worn armor, skin / hair colours and tint
+// masks, the player's live face or the NPC's FaceGen head and head parts.
+// When the reference's 3D is loaded the preview also takes its current pose
+// and expression once, then keeps mirroring with `mirrorFlags`
+// (SKYRIMRENDERER_MIRROR_*; 0 = a still snapshot). Body morphs (RaceMenu /
+// OBody) are not readable here: pass them with SetActorMorphs. Returns the
+// actor handle (DestroyActorPreview frees it), 0 on failure.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorFromReference(uint32_t scene, uint32_t refFormID,
+                                                                   uint32_t mirrorFlags);
+
+// Start, change or stop (flags 0) mirroring a live reference onto any full
+// actor preview (head previews take FACE only). POSE replaces the preview's
+// animation (the clip is dropped). Returns 1, 0 for an unknown actor or a
+// reference that is not an actor.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetLiveMirror(uint32_t actor, uint32_t refFormID, uint32_t flags);
+
+// Fill out (out->structSize must be set). Returns 1, 0 for an unknown actor or
+// a too-small struct; an actor without a mirror reports refFormID 0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetLiveMirrorStatus(uint32_t actor, SkyrimRenderer_LiveMirrorStatus* out);
+
+// Set one face morph weight (group SKYRIMRENDERER_FACE_*, index per the table
+// above) on an actor or head preview. Applied on the scene's next render. A
+// live FACE mirror overwrites the slots it reads every frame. Returns 1 when
+// the actor has at least one head mesh with expression morphs, else 0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetFaceMorph(uint32_t actor, uint32_t group, uint32_t index, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetExpression(uint32_t actor, uint32_t expression, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetModifier(uint32_t actor, uint32_t modifier, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetPhoneme(uint32_t actor, uint32_t phoneme, float weight);
+
+// Zero every face morph weight.
+SKYRIMRENDERER_API void SkyrimRenderer_ResetFaceMorphs(uint32_t actor);
+
+// Face cam: a scene of width x height pixels with the live reference loaded
+// (LoadActorFromReference with mirrorFlags = flags' SKYRIMRENDERER_MIRROR_*
+// bits, SKYRIMRENDERER_MIRROR_DEFAULT when they are 0), framed HeadShot
+// (or FACECAM_FACE_CLOSE / FACECAM_UPPER_BODY), Portrait lighting, and shown
+// as a screen window at (x, y): the scene's composite rect, which installs
+// the Present hook for the calling mod if it is not installed yet. Move or
+// hide the window with SetCompositeRect / ClearCompositeRect; frame it with
+// AddOverlay + AttachOverlayToScene. With FACECAM_TEXTURE_MODE the scene is a
+// texture-mode scene instead (no rect, no hook; sample GetSceneTexture and
+// call Tick once per frame). The preview is independent of the live actor:
+// nothing on the live actor is hidden or changed, in first person or not.
+// Returns 1 and the handles (either out pointer may be NULL), 0 on failure.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_CreateLiveFaceCam(uint32_t refFormID, float x, float y,
+                                                            float width, float height, uint32_t flags,
+                                                            uint32_t* out_scene, uint32_t* out_actor);
+
+// Destroy a face cam's scene, its actor and its mirror (DestroyScene).
+SKYRIMRENDERER_API void SkyrimRenderer_DestroyLiveFaceCam(uint32_t scene);
+
 } // extern "C"

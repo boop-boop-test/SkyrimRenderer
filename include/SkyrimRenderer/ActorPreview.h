@@ -16,8 +16,12 @@
 
 struct SkyrimRenderer_HeadShapeInfo;
 struct SkyrimRenderer_HeadSourceInfo;
+struct SkyrimRenderer_LiveMirrorStatus;
 
 namespace SkyrimRenderer {
+
+class LiveMirror;
+class FaceMorphController;
 
 /// Resolve the HKX skeleton path from race + sex + skeleton NIF path.
 std::string ResolveSkeletonHkxPath(RE::TESRace* race, bool isFemale,
@@ -155,6 +159,31 @@ public:
     /// this preview is not the player, has no live-face meshes, or the player's
     /// 3D is not loaded.
     bool RefreshLiveFace();
+
+    // ── Live Mirror (LiveMirror.cpp) ────────────────────────────────────────
+
+    /// Mirror a live actor reference onto this preview every frame
+    /// (SKYRIMRENDERER_MIRROR_*); flags 0 stops. Main thread.
+    Result SetLiveMirror(RE::FormID refFormID, uint32_t flags);
+    bool HasLiveMirror() const { return liveMirror_ != nullptr; }
+    /// One mirror step (SceneManager::Tick, main thread, this actor's lock not
+    /// held). True when the scene should re-render.
+    bool TickLiveMirror(float deltaSeconds);
+    /// False for a too-small struct; refFormID 0 when not mirroring.
+    bool GetLiveMirrorStatus(SkyrimRenderer_LiveMirrorStatus& out) const;
+    /// Camera preset re-applied after a mirrored equipment rebuild (face cam).
+    void SetLiveMirrorCameraPreset(CameraPreset preset);
+
+    // ── Expressions (LiveMirror.cpp, FaceMorphs.cpp) ────────────────────────
+
+    /// SKYRIMRENDERER_FACE_* slot weight on the head parts' expression tris.
+    /// Returns the head meshes with expression morphs (0: none / bad slot).
+    uint32_t SetFaceMorph(uint32_t group, uint32_t index, float weight);
+    void ResetFaceMorphs();
+    bool HasFaceMorphs() const { return faceMorphs_ != nullptr; }
+    /// Upload the changed expression morph buffers. Before each render of this
+    /// actor's scene (SceneManager does it), on the thread that renders.
+    uint32_t FlushFaceMorphs();
 
     // ── Drivable Head (head-only previews) ──────────────────────────────────
 
@@ -344,6 +373,14 @@ private:
         bool skyPatcherDonor = false;
     } headSource_;
     std::vector<uint8_t> uploadScratch_;   // SkinnedVertex staging, reused per frame
+
+    // ── Live mirror / expressions ──
+    friend class LiveMirror;
+    friend class FaceMorphController;
+    std::unique_ptr<FaceMorphController> faceMorphs_;
+    std::unique_ptr<LiveMirror> liveMirror_;
+    uint32_t meshGeneration_ = 0;   // bumped by every RebuildMeshes
+    uint32_t poseGeneration_ = 0;   // bumped whenever gpuPose_ is reassigned
 
     mutable std::mutex mutex_;
 };
