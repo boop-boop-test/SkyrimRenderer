@@ -142,6 +142,9 @@ float4 PSMain(PSInput input) : SV_TARGET {
     float skyBlend = N.z * 0.5 + 0.5;
     float3 directionalAmbient = lerp(ambientDown.rgb, ambientUp.rgb, skyBlend) * ambIntensity;
 
+    // Scene look (SceneLook.hlsl): key light self-shadow + SSAO. No-ops when off.
+    SceneLook_BeginPixel(input.worldPos, normalize(input.normal), input.pos.xy);
+
     // Accumulate lighting from all 3 lights.
     bool isHair = (shadingModel == SHADING_HAIRTINT);
     bool hasSpecFlag = (shaderFlags & FLAG_SPECULAR) != 0;
@@ -152,6 +155,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
                      hasSKTex, hasBacklight,
                      isHair, hairVC,
                      diffuseLight, specularLight);
+    SceneLook_ApplyOcclusion(directionalAmbient, diffuseLight, specularLight);
 
     // Final assembly — follows vanilla GetOutDiffuse + AddOutSpecular pattern
     float3 totalLight = diffuseLight + directionalAmbient;

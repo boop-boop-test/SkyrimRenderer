@@ -10,6 +10,7 @@
 #include "SkyrimRenderer/ImageExporter.h"
 #include "SkyrimRenderer/FrameOverlayRenderer.h"
 #include "SkyrimRenderer/PostProcessPass.h"
+#include "SkyrimRenderer/SceneLook.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -121,6 +122,12 @@ public:
     /// the curve off (exposure, then a hard clip: builds before 1.8.0).
     void SetToneMapping(float exposure, float whitePoint);
     void GetToneMapping(float& exposure, float& whitePoint) const;
+
+    // ── Scene look (ground shadow, self-shadow, SSAO, debug views) ──────────
+
+    /// Settings live on the SceneLook (thread-safe setters). Null only when
+    /// the scene failed to initialize.
+    SceneLook* GetSceneLook() const { return sceneLook_.get(); }
 
     // ── Rendering ───────────────────────────────────────────────────────────
 
@@ -279,6 +286,7 @@ private:
     ShaderPipeline shader_;
     CameraController camera_;
     std::unique_ptr<MeshRenderer> meshRenderer_;
+    std::unique_ptr<SceneLook> sceneLook_;
 
     // Scene graph
     RE::NiPointer<RE::NiNode> sceneRoot_;

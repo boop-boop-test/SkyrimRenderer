@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "Common.hlsl"
+#include "SceneLook.hlsl"
 
 // ── Blinn-Phong (from reference BlinnPhong.hlsl) ────────────────────────────
 
@@ -167,7 +168,10 @@ void AccumulateLights(
 
     float3 lights[3]     = { light0Dir.xyz, light1Dir.xyz, light2Dir.xyz };
     float3 lightCols[3]  = { light0Color.rgb, light1Color.rgb, light2Color.rgb };
-    float  lightInts[3]  = { light0Dir.w, light1Dir.w, light2Dir.w };
+    // SceneLook_LightScale: key light self-shadow (exactly 1.0 when off)
+    float  lightInts[3]  = { light0Dir.w * SceneLook_LightScale(0),
+                             light1Dir.w * SceneLook_LightScale(1),
+                             light2Dir.w * SceneLook_LightScale(2) };
 
     // For anisotropic hair, we need a vertex normal approximation.
     // Without TBN, use the interpolated normal as both.

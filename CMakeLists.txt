@@ -74,6 +74,11 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/ExportEncoders.h
     include/SkyrimRenderer/TurntableExporter.h
     include/SkyrimRenderer/ItemPreview.h
+    include/SkyrimRenderer/SceneLookTypes.h
+    include/SkyrimRenderer/SceneLook.h
+    include/SkyrimRenderer/ShadowPass.h
+    include/SkyrimRenderer/SSAOPass.h
+    include/SkyrimRenderer/DebugViewPass.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -109,6 +114,10 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/TurntableExporter.cpp
     src/SkyrimRenderer/ItemPreview.cpp
     src/SkyrimRenderer/WorkerPool.cpp
+    src/SkyrimRenderer/SceneLook.cpp
+    src/SkyrimRenderer/ShadowPass.cpp
+    src/SkyrimRenderer/SSAOPass.cpp
+    src/SkyrimRenderer/DebugViewPass.cpp
 )
 
 # Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at
