@@ -18,6 +18,8 @@ namespace SkyrimRenderer {
 ///
 /// One ParallelFor at a time (the render path runs on the game's main thread);
 /// a nested or concurrent call runs inline on its caller.
+///
+/// SetLimit caps the workers a ParallelFor may use (SkyrimRenderer_SetPrepWorkers).
 class WorkerPool {
 public:
     static WorkerPool& Get();
@@ -29,6 +31,13 @@ public:
     void ParallelFor(uint32_t count, const std::function<void(uint32_t)>& fn);
 
     uint32_t WorkerCount() const { return static_cast<uint32_t>(workers_.size()); }
+    /// Workers a ParallelFor may use (DefaultLimit unless changed).
+    uint32_t WorkerLimit() const { return limit_.load(std::memory_order_relaxed); }
+    /// Physical-core based default (half the cores minus one, at most 3).
+    uint32_t DefaultLimit() const { return defaultLimit_; }
+    /// Cap the workers per ParallelFor: 0 = all on the calling thread, at most
+    /// WorkerCount; negative = back to DefaultLimit. Returns the applied cap.
+    uint32_t SetLimit(int32_t limit);
 
 private:
     WorkerPool();
@@ -49,6 +58,9 @@ private:
     uint32_t active_ = 0;      // workers inside the current job
     std::mutex errorMutex_;
     std::exception_ptr error_;  // first throw of the current job
+
+    std::atomic<uint32_t> limit_{0};
+    uint32_t defaultLimit_ = 0;
 };
 
 } // namespace SkyrimRenderer

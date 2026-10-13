@@ -26,7 +26,7 @@
 // Consumers resolve every function with GetProcAddress (define
 // SKYRIMRENDERER_STATIC before including SkyrimRendererAPI.h) and should
 // pass Result::shaderDir to SkyrimRenderer_SetShaderDirectory so the DLL
-// never runs another build's shaders. (API v3+ DLLs default to it anyway.)
+// never runs another build's shaders. (The DLL defaults to it anyway.)
 
 #include <Windows.h>
 

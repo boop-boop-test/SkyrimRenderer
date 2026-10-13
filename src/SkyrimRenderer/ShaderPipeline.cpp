@@ -31,7 +31,7 @@ struct alignas(16) GPU_PerFrame {
 struct alignas(16) GPU_PerMesh {
     DirectX::XMFLOAT4 materialParams;       // specStr, gloss, materialAlpha, alphaCutoff
     DirectX::XMFLOAT4 tintColor;            // rgb = tint
-    DirectX::XMUINT4  materialFlags;        // shadingModel, shaderFlags, texMask
+    DirectX::XMUINT4  materialFlags;        // shadingModel, shaderFlags, texMask, solidCoverage
     DirectX::XMFLOAT4 specularColor;        // xyz = vanilla SpecularColour
     DirectX::XMFLOAT4 lightingEffectParams; // x = softRolloff, y = rimPower, z = backlightScale
     DirectX::XMFLOAT4 emissiveParams;       // rgb = emissive colour x multiple x scene scale
@@ -288,8 +288,9 @@ Result ShaderPipeline::Compile() {
     // determines the background opacity.
     constexpr UINT8 kWriteAll = D3D11_COLOR_WRITE_ENABLE_ALL;
 
-    // Opaque blend state: no blending for RGB, but alpha uses over-compositing
-    // so opaque mesh pixels write alpha=1.0 over the clear value (Pass 1 & 2)
+    // Opaque blend state (Pass 1 & 2): the pixel shader's colour and alpha
+    // replace the target's. Opaque and cutout draws output alpha 1.0
+    // (PerMeshData::solidCoverage), so their pixels are fully covered.
     D3D11_BLEND_DESC opaqueBlendDesc = {};
     opaqueBlendDesc.RenderTarget[0].BlendEnable = TRUE;
     opaqueBlendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
@@ -414,7 +415,7 @@ void ShaderPipeline::UpdatePerMeshConstants(ID3D11DeviceContext* ctx, const PerM
         static_cast<uint32_t>(mesh.shadingModel),
         static_cast<uint32_t>(mesh.shaderFlags),
         mesh.textureMask,
-        0);
+        mesh.solidCoverage ? 1u : 0u);
     cb->specularColor = DirectX::XMFLOAT4(mesh.specularColor[0], mesh.specularColor[1],
                                             mesh.specularColor[2], 0.0f);
     cb->lightingEffectParams = DirectX::XMFLOAT4(mesh.softLightingRolloff, mesh.rimLightPower,

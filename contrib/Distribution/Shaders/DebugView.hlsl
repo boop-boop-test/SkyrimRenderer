@@ -166,7 +166,8 @@ float4 PSDebug(DebugPSInput dinput) : SV_TARGET {
                          (shaderFlags & FLAG_RIM_LIGHTING) != 0 && !isHair,
                          (shaderFlags & FLAG_BACK_LIGHTING) != 0,
                          (texMask & TEX_SUBSURFACE) != 0, (texMask & TEX_BACKLIGHT) != 0,
-                         isHair, hairVC, diffuseLight, specularLight);
+                         isHair, (shaderFlags & FLAG_ANISO_LIGHTING) != 0, hairVC,
+                         diffuseLight, specularLight);
         SceneLook_ApplyOcclusion(ambient, diffuseLight, specularLight);
         color = DV_LinearToSRGB(ToneMapReinhard(max(diffuseLight + ambient + specularLight * specularColor.xyz, 0.0)));
     }

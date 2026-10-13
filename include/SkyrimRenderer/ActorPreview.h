@@ -209,14 +209,24 @@ public:
     /// actor's scene (SceneManager does it), on the thread that renders.
     uint32_t FlushFaceMorphs();
 
-    // ── Drivable Head (head-only previews) ──────────────────────────────────
+    // ── Drivable Head (head previews; full previews once enabled) ──────────
 
     bool IsHeadOnly() const { return headOnly_; }
+    /// Driven head shapes exist: always on a head preview, on a full preview
+    /// after its first SetHeadDriveFlags.
+    bool HasDrivenHead() const { return headOnly_ || drivenHeadEnabled_; }
     uint32_t GetHeadShapeCount() const;
+    /// Bumped whenever the driven shapes are rebuilt (positions pointers and
+    /// shape indices from before are then invalid).
+    uint32_t GetHeadShapeGeneration() const;
     bool GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo& out);
     bool GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const;
     /// SKYRIMRENDERER_HEAD_DRIVE_* flags; changing OFFSETS resets the arrays.
+    /// On a full preview the first call builds the driven head shapes.
     void SetHeadDriveFlags(uint32_t flags);
+    /// Rebuild the driven shapes when the scene's mesh list moved under them
+    /// (meshes added / removed without a RebuildMeshes). Lock held.
+    void ValidateDrivenHeadLocked();
     /// Upload every driven array that changed since the last call. Run before
     /// each render of this actor's scene (SceneManager does it). Main thread.
     /// Serial form of LockDrivenHead + PrepareDrivenShape (each) + CommitDrivenHead.
@@ -225,8 +235,12 @@ public:
     /// Split flush, for preparing many shapes (and heads) in parallel. Hold the
     /// returned lock across Prepare and Commit.
     std::unique_lock<std::mutex> LockDrivenHead() { return std::unique_lock(mutex_); }
-    /// Driven shapes of this head (lock held).
+    /// Driven shapes of this head (lock held; ValidateDrivenHeadLocked first).
     uint32_t DrivenShapeCount() const { return static_cast<uint32_t>(drivenShapes_.size()); }
+    /// Vertices of a driven shape (lock held); 0 for an unknown index.
+    uint32_t DrivenShapeVertexCount(uint32_t shape) const {
+        return shape < drivenShapes_.size() ? static_cast<uint32_t>(drivenShapes_[shape].rest.size() / 3) : 0;
+    }
     /// CPU part for one shape: change check, rest + offset, normals, the GPU
     /// vertex image into the shape's own staging. Lock held by the caller; safe
     /// to run for different shapes on different threads at once (no D3D, no
@@ -235,6 +249,16 @@ public:
     /// Upload the staged shapes (D3D, the thread that renders). Lock held.
     /// Returns the shapes uploaded.
     uint32_t CommitDrivenHead();
+
+    // ── Bone overrides ──────────────────────────────────────────────────────
+
+    /// Model-space rotation applied to a bone and everything under it after
+    /// every pose (animation sample, bind pose, live mirror), about the bone's
+    /// own position: rotation' = R * rotation, position' = pivot + R * (p - pivot).
+    /// rot9: row-major, column-vector convention (NiMatrix3 entry[r][c]);
+    /// null clears the bone. Empty / null bone clears every override.
+    /// False for a bone the skeleton does not have, or a non-finite matrix.
+    bool SetBoneRotation(const char* boneName, const float* rot9);
 
     // ── Camera Presets ──────────────────────────────────────────────────────
 
@@ -271,8 +295,15 @@ private:
     // loaded mesh NIFs' extra bones, once. False when the NIF can't be read.
     bool EnsureNifSkeleton();
 
-    // Build drivenShapes_ from the loaded head meshes (end of RebuildMeshes)
-    void BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh);
+    // Build drivenShapes_ from the loaded head meshes (end of RebuildMeshes,
+    // or on demand for a full preview). Head parts come from headPartsByMesh_.
+    void BuildDrivenHead();
+    // A full preview's head mesh: the FaceGen face request or a head part, never armor.
+    bool IsDrivableHeadMesh(const LoadedMesh& mesh) const;
+
+    // Re-apply boneOverrides_ to gpuPose_ (idempotent: restores the bones it
+    // rotated last time when nothing rewrote them since). Lock held.
+    void ApplyBoneOverrides();
 
     // Re-upload a mesh's bindPoseVertices to its GPU vertex buffer (dynamic
     // buffer created on first use, Map/WRITE_DISCARD afterwards). skinned: the
@@ -385,12 +416,30 @@ private:
         std::vector<float> restNormals;    // xyz per vertex, as loaded
         std::vector<float> restTangents;   // xyzw per vertex, as loaded
         std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
+        std::vector<std::array<float, 3>> normalScratch;  // RecomputeNormals accumulator, reused
+        std::string meshName;              // the mesh's name when built (stale check)
         bool pending = false;              // prepared, not yet uploaded
         bool stale = false;                // a prep threw after `uploaded` changed: redo it
     };
     std::vector<DrivenShape> drivenShapes_;
     uint32_t headDriveFlags_ = 0;
     bool headDriveDirty_ = false;          // flags changed: re-upload everything
+    bool drivenHeadEnabled_ = false;       // full preview: SetHeadDriveFlags was called
+    uint32_t drivenGeneration_ = 0;        // bumped by every BuildDrivenHead
+    // Head part behind each loaded head mesh, by mesh name (from RebuildMeshes)
+    std::unordered_map<std::string, RE::BGSHeadPart*> headPartsByMesh_;
+
+    struct BoneOverride {
+        std::string bone;
+        Mat3 rotation;
+    };
+    std::vector<BoneOverride> boneOverrides_;
+    // Bones the last ApplyBoneOverrides rotated: the pose value before and after.
+    struct OverriddenBone {
+        BoneTransform base;
+        BoneTransform out;
+    };
+    std::unordered_map<std::string, OverriddenBone> overriddenBones_;
     struct HeadSource {
         uint32_t source = 0;               // SKYRIMRENDERER_HEAD_SOURCE_*
         std::string faceGenPath;

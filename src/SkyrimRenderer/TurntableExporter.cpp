@@ -568,6 +568,7 @@ void TurntableExporter::TickJob(Job& job) {
 
     const float liveYaw = scene->GetCameraYaw(), livePitch = scene->GetCameraPitch();
     const float liveDistance = scene->GetCameraDistance(), liveFocal = scene->GetCameraFocalHeight();
+    const auto livePreset = scene->GetActivePreset();  // SetCamera forgets it; the live camera did not move
     const bool stepTime = (d.flags & kStepTime) != 0;
     const float liveTime = stepTime ? mgr.GetAnimationState(d.actor).currentTime : 0.0f;
 
@@ -583,6 +584,7 @@ void TurntableExporter::TickJob(Job& job) {
     }
 
     scene->SetCamera(liveYaw, livePitch, liveDistance, liveFocal);
+    scene->RestoreActivePreset(livePreset);
     if (stepTime) mgr.SeekAnimation(d.actor, liveTime);
     if (Failed(result)) FinishJob(job, State::Failed, result);
 }

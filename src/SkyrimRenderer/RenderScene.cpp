@@ -167,6 +167,7 @@ RenderScene::RenderScene(RenderScene&& other) noexcept {
     meshRenderer_ = std::move(other.meshRenderer_);
     sceneLook_ = std::move(other.sceneLook_);
     camera_ = other.camera_;
+    activePreset_ = other.activePreset_;
     sceneRoot_ = std::move(other.sceneRoot_);
     nextNodeHandle_ = other.nextNodeHandle_;
     nodes_ = std::move(other.nodes_);
@@ -212,6 +213,7 @@ RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
         meshRenderer_ = std::move(other.meshRenderer_);
         sceneLook_ = std::move(other.sceneLook_);
         camera_ = other.camera_;
+        activePreset_ = other.activePreset_;
         sceneRoot_ = std::move(other.sceneRoot_);
         nextNodeHandle_ = other.nextNodeHandle_;
         nodes_ = std::move(other.nodes_);
@@ -296,16 +298,41 @@ RE::NiNode* RenderScene::GetSceneRoot() const {
 
 void RenderScene::SetCamera(float yaw, float pitch, float distance, float focalHeight) {
     std::lock_guard lock(mutex_);
+    activePreset_.reset();
     camera_.SetOrbit(yaw, pitch, distance, focalHeight);
 }
 
 void RenderScene::SetFOV(float fovDegrees) {
     std::lock_guard lock(mutex_);
     camera_.SetFOV(fovDegrees);
+    if (activePreset_) ApplyPresetLocked(*activePreset_);
+}
+
+void RenderScene::SetFramingScale(float scale) {
+    std::lock_guard lock(mutex_);
+    camera_.SetFramingScale(scale);
+    if (activePreset_) ApplyPresetLocked(*activePreset_);
+}
+
+float RenderScene::GetFramingScale() const { return camera_.GetFramingScale(); }
+
+std::optional<CameraPreset> RenderScene::GetActivePreset() const {
+    std::lock_guard lock(mutex_);
+    return activePreset_;
+}
+
+void RenderScene::RestoreActivePreset(std::optional<CameraPreset> preset) {
+    std::lock_guard lock(mutex_);
+    activePreset_ = preset;
 }
 
 void RenderScene::SetCameraPreset(CameraPreset preset) {
     std::lock_guard lock(mutex_);
+    activePreset_ = preset;
+    ApplyPresetLocked(preset);
+}
+
+void RenderScene::ApplyPresetLocked(CameraPreset preset) {
     camera_.SetPreset(preset, loadedMeshes_, sceneRoot_.get(),
                       hasHeadBone_ ? &headBonePos_ : nullptr, gpuSkinningPose_);
 }
@@ -315,7 +342,11 @@ float RenderScene::GetCameraPitch() const { return camera_.GetPitch(); }
 float RenderScene::GetCameraDistance() const { return camera_.GetDistance(); }
 float RenderScene::GetCameraFocalHeight() const { return camera_.GetFocalHeight(); }
 float RenderScene::GetCameraFOV() const { return camera_.GetFOV(); }
-void RenderScene::PanCamera(float dx, float dy) { camera_.Pan(dx, dy); }
+void RenderScene::PanCamera(float dx, float dy) {
+    std::lock_guard lock(mutex_);
+    activePreset_.reset();
+    camera_.Pan(dx, dy);
+}
 
 // ============================================================================
 // Lighting

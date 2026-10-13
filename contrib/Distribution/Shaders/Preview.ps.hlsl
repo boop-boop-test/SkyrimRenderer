@@ -154,7 +154,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
                      hasSpecFlag,
                      useSoftLighting, useRimLighting, useBackLighting,
                      hasSKTex, hasBacklight,
-                     isHair, hairVC,
+                     isHair, (shaderFlags & FLAG_ANISO_LIGHTING) != 0, hairVC,
                      diffuseLight, specularLight);
     SceneLook_ApplyOcclusion(directionalAmbient, diffuseLight, specularLight);
 
@@ -222,6 +222,20 @@ float4 PSMain(PSInput input) : SV_TARGET {
     bool isDecal = (shaderFlags & FLAG_DECAL) != 0;
     if (isDecal) {
         alpha = saturate(1.05 * alpha);
+    }
+
+    // Coverage. Opaque and alpha-tested draws (materialFlags.w = 1) fully cover
+    // every pixel they don't discard, as in the game, where the alpha test only
+    // decides which pixels survive. Their pass writes alpha unblended
+    // (ONE / ZERO), and the target is consumed with its alpha (texture mode,
+    // portraits), so writing the diffuse alpha here punched see-through holes
+    // into whatever these surfaces cover: a 1-bit beard (test at 52/255) left
+    // its texel alpha (0.2..1) over the opaque face, and those pixels showed
+    // the page behind the portrait (a white fringe along the strands).
+    // Blended draws keep their alpha for the over-blend. This is the texture-mode
+    // contract (SkyrimRendererAPI.h); CSRenderPath::DrawCoverage matches it.
+    if (materialFlags.w != 0) {
+        alpha = 1.0;
     }
 
     // Manual linear→sRGB encode. The RTV is UNORM (not sRGB) so alpha blending

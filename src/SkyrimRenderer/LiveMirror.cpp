@@ -248,6 +248,7 @@ bool LiveMirror::Tick(ActorPreview& actor, float deltaSeconds) {
             BindPose(actor, root);
         }
         if (!liveNodes_.empty() && UpdatePose(actor)) {
+            actor.ApplyBoneOverrides();  // SetBoneRotation on top of the live pose
             render = true;
             ++poseChanges_;
             lastPoseChange_ = now;

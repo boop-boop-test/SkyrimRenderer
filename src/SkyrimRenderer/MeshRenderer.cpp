@@ -184,6 +184,9 @@ void MeshRenderer::DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& me
     perMesh.pbrRoughnessScale = mesh.pbrRoughnessScale;
     perMesh.pbrSpecularLevel = mesh.pbrSpecularLevel;
     perMesh.pbrDisplacementScale = mesh.pbrDisplacementScale;
+    // Opaque and cutout passes write alpha unblended: their surviving pixels
+    // must carry alpha 1, not the diffuse alpha (see Preview.ps.hlsl, Coverage).
+    perMesh.solidCoverage = mesh.alphaMode != AlphaMode::Blended;
 
     shader_.UpdatePerMeshConstants(ctx, perMesh);
 

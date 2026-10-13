@@ -1301,8 +1301,92 @@ void ActorPreview::ApplyPoseGPUSkinning(const BonePoseMap& pose) {
                         meshBonesFilled);
     }
 
+    overriddenBones_.clear();  // gpuPose_ is all new: nothing to restore
+    ApplyBoneOverrides();
     scene_.SetGPUSkinningPose(&gpuPose_);
     ++poseGeneration_;  // gpuPose_ was reassigned: live mirror slots are stale
+}
+
+bool ActorPreview::SetBoneRotation(const char* boneName, const float* rot9) {
+    std::lock_guard lock(mutex_);
+    if (!boneName || !boneName[0]) {
+        boneOverrides_.clear();
+        ApplyBoneOverrides();
+        return true;
+    }
+    std::string bone(boneName);
+    if (rot9) {
+        for (int i = 0; i < 9; ++i) {
+            if (!std::isfinite(rot9[i])) return false;
+        }
+    }
+    // Setting and clearing alike: a bone the skeleton does not have is 0.
+    EnsureNifSkeleton();
+    if (nifSkeleton_.FindBone(bone) < 0 && !gpuPose_.contains(bone)) return false;
+    std::erase_if(boneOverrides_, [&](const BoneOverride& o) { return o.bone == bone; });
+    if (rot9) {
+        BoneOverride o{bone, {}};
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) o.rotation.m[r][c] = rot9[r * 3 + c];
+        }
+        boneOverrides_.push_back(std::move(o));
+    }
+    ApplyBoneOverrides();
+    return true;
+}
+
+void ActorPreview::ApplyBoneOverrides() {
+    if (boneOverrides_.empty() && overriddenBones_.empty()) return;
+    auto same = [](const BoneTransform& a, const BoneTransform& b) {
+        return std::memcmp(&a, &b, sizeof(BoneTransform)) == 0;
+    };
+
+    // Undo last time's rotation where nothing has written the bone since; a
+    // bone that was rewritten (new animation sample, mirror) is already fresh.
+    for (const auto& [name, slot] : overriddenBones_) {
+        auto it = gpuPose_.find(name);
+        if (it != gpuPose_.end() && same(it->second, slot.out)) it->second = slot.base;
+    }
+    overriddenBones_.clear();
+    if (boneOverrides_.empty() || gpuPose_.empty()) return;
+
+    // Bones under each overridden bone, from the NIF hierarchy (parents come
+    // before children). Bones only in the pose map hold their bind pose.
+    const auto& bones = nifSkeleton_.bones;
+    std::vector<uint8_t> moving(bones.size());
+    for (const auto& o : boneOverrides_) {
+        auto pivotIt = gpuPose_.find(o.bone);
+        if (pivotIt == gpuPose_.end()) continue;
+        const float pivot[3] = {pivotIt->second.translation[0], pivotIt->second.translation[1],
+                                pivotIt->second.translation[2]};
+
+        const int32_t root = nifSkeleton_.FindBone(o.bone);
+        std::fill(moving.begin(), moving.end(), uint8_t{0});
+        auto rotate = [&](const std::string& name) {
+            auto it = gpuPose_.find(name);
+            if (it == gpuPose_.end()) return;
+            auto& t = it->second;
+            auto [slot, fresh] = overriddenBones_.try_emplace(name);
+            if (fresh) slot->second.base = t;
+            const float d[3] = {t.translation[0] - pivot[0], t.translation[1] - pivot[1], t.translation[2] - pivot[2]};
+            float rd[3];
+            o.rotation.TransformVector(d, rd);
+            t.rotation = o.rotation * t.rotation;
+            for (int k = 0; k < 3; ++k) t.translation[k] = pivot[k] + rd[k];
+            slot->second.out = t;
+        };
+        if (root < 0) {
+            rotate(o.bone);
+            continue;
+        }
+        for (size_t i = static_cast<size_t>(root); i < bones.size(); ++i) {
+            const bool under = i == static_cast<size_t>(root) ||
+                               (bones[i].parentIndex >= 0 && moving[bones[i].parentIndex]);
+            if (!under) continue;
+            moving[i] = 1;
+            rotate(bones[i].name);
+        }
+    }
 }
 
 void ActorPreview::ApplyPoseToMeshes(const BonePoseMap& pose) {
@@ -1538,11 +1622,15 @@ static void FillSkinnedVertices(const LoadedMesh& mesh, SkinnedVertex* out) {
 // replaces positions, so the NIF's baked normals describe the un-morphed face.
 // Triangle winding is taken from the NIF's own normals (majority vote) rather
 // than assumed, so a mesh with flipped winding still lights the right way.
-static void RecomputeNormals(LoadedMesh& mesh) {
+// `scratch` is caller-owned so the per-frame driven-head path allocates nothing
+// (a fresh ~100 KB block per shape per frame contended on the heap when shapes
+// were prepared in parallel).
+static void RecomputeNormals(LoadedMesh& mesh, std::vector<std::array<float, 3>>& scratch) {
     if (mesh.indices.size() < 3 || mesh.bindPoseVertices.size() != mesh.vertexCount) return;
     auto& verts = mesh.bindPoseVertices;
 
-    std::vector<std::array<float, 3>> accum(mesh.vertexCount, {0.0f, 0.0f, 0.0f});
+    auto& accum = scratch;
+    accum.assign(mesh.vertexCount, {0.0f, 0.0f, 0.0f});
     for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
         uint16_t ia = mesh.indices[i], ib = mesh.indices[i + 1], ic = mesh.indices[i + 2];
         if (ia >= mesh.vertexCount || ib >= mesh.vertexCount || ic >= mesh.vertexCount) continue;
@@ -1664,7 +1752,8 @@ bool ActorPreview::UploadLiveFacePositions(bool quiet) {
                 mesh.bindPoseVertices[v].position[1] = morphPositions[v][1];
                 mesh.bindPoseVertices[v].position[2] = morphPositions[v][2];
             }
-            RecomputeNormals(mesh);
+            std::vector<std::array<float, 3>> normalScratch;
+            RecomputeNormals(mesh, normalScratch);
 
             const bool uploaded = UploadMeshBindPose(meshIndex);
 
@@ -1743,8 +1832,17 @@ void CollectHeadParts(RE::BGSHeadPart* part, std::unordered_map<std::string, RE:
 
 }  // namespace
 
-void ActorPreview::BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh) {
+bool ActorPreview::IsDrivableHeadMesh(const LoadedMesh& mesh) const {
+    if (mesh.owner != this || mesh.tag == MeshTag::Equipment || mesh.tag == MeshTag::Preview) return false;
+    if (mesh.sourceKind == SKYRIMRENDERER_PICK_HEADPART) return true;
+    // The FaceGen / face head part request (head slot 30) is stamped as body.
+    return mesh.sourceKind == SKYRIMRENDERER_PICK_BODY && mesh.sourceSlotMask == (1u << 0);
+}
+
+void ActorPreview::BuildDrivenHead() {
     drivenShapes_.clear();
+    ++drivenGeneration_;
+    const auto& partsByMesh = headPartsByMesh_;
 
     // FaceGen NIFs name each baked shape after its head part's editor ID.
     std::unordered_map<std::string, RE::BGSHeadPart*> byEditorID;
@@ -1765,12 +1863,14 @@ void ActorPreview::BuildDrivenHead(const std::unordered_map<std::string, RE::BGS
     const auto& meshes = scene_.GetLoadedMeshes();
     for (uint32_t i = 0; i < meshes.size(); ++i) {
         const auto& mesh = meshes[i];
+        if (!headOnly_ && !IsDrivableHeadMesh(mesh)) continue;  // body, armor, held items
         if (!mesh.isGPUSkinned || mesh.vertexCount == 0 || mesh.bindPoseVertices.size() != mesh.vertexCount) {
             SKSE::log::info("[SkyrimRenderer] Head shape '{}' is not drivable (unskinned or no bind pose)", mesh.name);
             continue;
         }
         DrivenShape ds;
         ds.meshIndex = i;
+        ds.meshName = mesh.name;
         if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) ds.part = it->second;
         else if (auto it2 = byEditorID.find(mesh.name); it2 != byEditorID.end()) ds.part = it2->second;
 
@@ -1796,13 +1896,55 @@ void ActorPreview::BuildDrivenHead(const std::unordered_map<std::string, RE::BGS
     }
 }
 
+void ActorPreview::ValidateDrivenHeadLocked() {
+    if (!HasDrivenHead()) return;
+    const auto& meshes = scene_.GetLoadedMeshes();
+    for (const auto& ds : drivenShapes_) {
+        const bool same = ds.meshIndex < meshes.size() && meshes[ds.meshIndex].name == ds.meshName &&
+                          static_cast<size_t>(meshes[ds.meshIndex].vertexCount) * 3 == ds.rest.size();
+        if (!same) {
+            SKSE::log::info("[SkyrimRenderer] Head shapes moved in the mesh list; rebuilding the driven head");
+            // The meshes still hold the last driven positions: put each one
+            // that is still loaded back to its rest before taking rest again.
+            auto& all = scene_.GetLoadedMeshesMut();
+            for (const auto& old : drivenShapes_) {
+                for (auto& mesh : all) {
+                    if (mesh.owner != this || mesh.name != old.meshName ||
+                        static_cast<size_t>(mesh.vertexCount) * 3 != old.rest.size() ||
+                        mesh.bindPoseVertices.size() != mesh.vertexCount) {
+                        continue;
+                    }
+                    for (size_t v = 0; v < mesh.vertexCount; ++v) {
+                        auto& bp = mesh.bindPoseVertices[v];
+                        std::memcpy(bp.position, &old.rest[v * 3], 3 * sizeof(float));
+                        std::memcpy(bp.normal, &old.restNormals[v * 3], 3 * sizeof(float));
+                        std::memcpy(bp.tangent, &old.restTangents[v * 4], 4 * sizeof(float));
+                    }
+                    break;
+                }
+            }
+            BuildDrivenHead();
+            headDriveDirty_ = true;  // the GPU copies may still show driven shapes
+            return;
+        }
+    }
+}
+
 uint32_t ActorPreview::GetHeadShapeCount() const {
     std::lock_guard lock(mutex_);
+    const_cast<ActorPreview*>(this)->ValidateDrivenHeadLocked();
     return static_cast<uint32_t>(drivenShapes_.size());
+}
+
+uint32_t ActorPreview::GetHeadShapeGeneration() const {
+    std::lock_guard lock(mutex_);
+    const_cast<ActorPreview*>(this)->ValidateDrivenHeadLocked();
+    return drivenGeneration_;
 }
 
 bool ActorPreview::GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo& out) {
     std::lock_guard lock(mutex_);
+    ValidateDrivenHeadLocked();
     if (index >= drivenShapes_.size() || out.structSize < sizeof(SkyrimRenderer_HeadShapeInfo)) return false;
     auto& ds = drivenShapes_[index];
     const auto& meshes = scene_.GetLoadedMeshes();
@@ -1844,7 +1986,8 @@ bool ActorPreview::GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo
 
 bool ActorPreview::GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const {
     std::lock_guard lock(mutex_);
-    if (!headOnly_ || out.structSize < sizeof(SkyrimRenderer_HeadSourceInfo)) return false;
+    // A full preview whose head is covered (or not loaded) has no head source.
+    if (headSource_.faceGenPath.empty() || out.structSize < sizeof(SkyrimRenderer_HeadSourceInfo)) return false;
     const uint32_t structSize = out.structSize;
     std::memset(&out, 0, sizeof(SkyrimRenderer_HeadSourceInfo));
     out.structSize = structSize;
@@ -1861,6 +2004,16 @@ bool ActorPreview::GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const {
 
 void ActorPreview::SetHeadDriveFlags(uint32_t flags) {
     std::lock_guard lock(mutex_);
+    if (!headOnly_ && !drivenHeadEnabled_) {
+        // Full preview: build the driven head now. Off until asked, so a full
+        // preview that never drives its head pays nothing per render.
+        drivenHeadEnabled_ = true;
+        headDriveFlags_ = flags;
+        BuildDrivenHead();
+        SKSE::log::info("[SkyrimRenderer] Full preview 0x{:X}: driven head on, {} shapes",
+                        actorFormID_, drivenShapes_.size());
+        return;
+    }
     if ((flags ^ headDriveFlags_) & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) {
         const bool offsets = (flags & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
         for (auto& ds : drivenShapes_) {
@@ -1874,6 +2027,7 @@ void ActorPreview::SetHeadDriveFlags(uint32_t flags) {
 
 void ActorPreview::FlushDrivenHead() {
     auto lock = LockDrivenHead();
+    ValidateDrivenHeadLocked();
     for (uint32_t s = 0; s < DrivenShapeCount(); ++s) PrepareDrivenShape(s);
     CommitDrivenHead();
 }
@@ -1918,7 +2072,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
         std::memcpy(bp.normal, &ds.restNormals[v * 3], 3 * sizeof(float));
         std::memcpy(bp.tangent, &ds.restTangents[v * 4], 4 * sizeof(float));
     }
-    if (recompute) RecomputeNormals(mesh);
+    if (recompute) RecomputeNormals(mesh, ds.normalScratch);
     if (mesh.isGPUSkinned && mesh.vertexCount == n) {
         ds.staged.resize(n * sizeof(SkinnedVertex));
         FillSkinnedVertices(mesh, reinterpret_cast<SkinnedVertex*>(ds.staged.data()));
@@ -2650,7 +2804,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     // Head part behind each loaded head mesh, by mesh name (indices shift when
     // baked FaceGen parts drop the separate head-part meshes below).
     std::unordered_map<std::string, RE::BGSHeadPart*> partsByMesh;
-    if (headOnly_) {
+    {
         const auto& loaded = scene_.GetLoadedMeshes();
         for (const auto& [part, batchIdx] : headPartBatch) {
             const auto& req = batchRequests[batchIdx];
@@ -3043,7 +3197,8 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         }
     }
 
-    if (headOnly_) BuildDrivenHead(partsByMesh);
+    headPartsByMesh_ = std::move(partsByMesh);
+    if (HasDrivenHead()) BuildDrivenHead();
     ++meshGeneration_;  // mesh indices changed: expression / live mirror bindings are stale
 
     auto rebuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(

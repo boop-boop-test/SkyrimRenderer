@@ -114,7 +114,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> staticDiffuseIBL_;   // Shaders/IBL/DiffuseIBL.dds -> t78
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> staticSpecularIBL_;  // Shaders/IBL/SpecIBL.dds -> t79
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> skinDetailNormal_;   // Shaders/Skin/skin_detail_n.dds -> t72
-    Microsoft::WRL::ComPtr<ID3D11BlendState> opaqueAlphaBlend_;  // RGB as-is, alpha = 1
+    Microsoft::WRL::ComPtr<ID3D11BlendState> opaqueAlphaBlend_;  // RGB as-is, alpha = max(As, Ad)
+    /// Coverage pass for opaque / cutout draws: alpha 1 where the CS draw survived.
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> coveragePS_;      // outputs alpha 1
+    Microsoft::WRL::ComPtr<ID3D11BlendState> coverageBlend_;    // alpha-only write, no blend
+    bool coverageFailed_ = false;
+    bool CoverageResources();
+    void DrawCoverage(ID3D11DeviceContext* ctx, UINT indexCount);
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> farDepth_;  // depth 1.0 at game resolution -> t17
     ID3D11ShaderResourceView* FarDepth();
     /// 1x1 stand-ins for textures a mesh doesn't provide, by RGBA8 texel.

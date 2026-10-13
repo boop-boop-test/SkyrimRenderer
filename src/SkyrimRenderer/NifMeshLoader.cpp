@@ -1447,6 +1447,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 if (sf1 & (1 << 27)) mesh.shaderFlags |= ShaderFlags::DynamicDecal;    // SLSF1_DYNAMIC_DECAL (bit 27)
                 if (sf2 & (1 << 4))  mesh.shaderFlags |= ShaderFlags::DoubleSided;       // SLSF2_DOUBLE_SIDED
                 if (sf2 & (1 << 5))  mesh.shaderFlags |= ShaderFlags::VertexColors;      // SLSF2_VERTEX_COLORS
+                if (sf2 & (1 << 21)) mesh.shaderFlags |= ShaderFlags::AnisoLighting;     // SLSF2_ANISOTROPIC_LIGHTING
                 if (sf2 & (1 << 25)) mesh.shaderFlags |= ShaderFlags::SoftLighting;      // SLSF2_SOFT_LIGHTING
                 if (sf2 & (1 << 26)) mesh.shaderFlags |= ShaderFlags::RimLighting;       // SLSF2_RIM_LIGHTING
                 if (sf2 & (1 << 27)) mesh.shaderFlags |= ShaderFlags::BackLighting;      // SLSF2_BACK_LIGHTING

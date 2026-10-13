@@ -9,6 +9,7 @@
 #include "SkyrimRenderer/ExportEncoders.h"
 #include "SkyrimRenderer/ItemPreview.h"
 #include "SkyrimRenderer/TurntableExporter.h"
+#include "SkyrimRenderer/WorkerPool.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -246,6 +247,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetCameraPreset(uint32_t scene, uint32_t preset) {
+    if (preset >= kCameraPresetCount) return;
     SceneManager::GetInstance().SetCameraPreset(ToScene(scene), ToCamPreset(preset));
 }
 
@@ -636,7 +638,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void) {
 
 
 // ============================================================================
-// API v2
+// Texture mode, device-lost guard, live face
 // ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetSceneTextureMode(uint32_t scene, int32_t enabled) {
@@ -678,7 +680,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor) {
     return SceneManager::GetInstance().RefreshLiveFace(ToActor(actor)) ? 1 : 0;
 }
 
-// --- API v4: drivable head --------------------------------------------------
+// --- Drivable head ----------------------------------------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorHead(uint32_t scene, uint32_t formID) {
     return static_cast<uint32_t>(SceneManager::GetInstance().LoadActorHead(
@@ -707,7 +709,18 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
 }
 
-// --- API v9: batched render, render stats, tone mapping ---------------------
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeGeneration() : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetBoneRotation(uint32_t actor, const char* boneName,
+                                                          const float* modelRot) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->SetBoneRotation(boneName, modelRot) ? 1 : 0;
+}
+
+// --- Batched render, render stats, tone mapping -----------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count) {
     if (!scenes || count == 0) return FromResult(Result::InvalidHandle);
@@ -748,7 +761,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* 
     return rs ? 1 : 0;
 }
 
-// ---- Export (API 10) ----
+// ---- Export ----
 
 static_assert(SKYRIMRENDERER_EXPORT_SHEET == static_cast<uint32_t>(TurntableExporter::Format::Sheet) &&
               SKYRIMRENDERER_EXPORT_FRAMES == static_cast<uint32_t>(TurntableExporter::Format::Frames) &&
@@ -873,7 +886,7 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint3
     return ItemPreview::Load(ToScene(scene), static_cast<RE::FormID>(formID), flags);
 }
 
-// ---- Scene look (API 10) ---------------------------------------------------
+// ---- Scene look -----------------------------------------------------------
 
 namespace {
 SceneLook* GetSceneLook(uint32_t scene) {
@@ -924,7 +937,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRen
     return 1;
 }
 
-// --- API 10: equipment & picking --------------------------------------------
+// --- Equipment & picking ----------------------------------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn) {
     if (hand != SKYRIMRENDERER_HAND_RIGHT && hand != SKYRIMRENDERER_HAND_LEFT) {
@@ -1010,7 +1023,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t f
     SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
 }
 
-// ---- Materials (API 10) ----
+// ---- Materials ----
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled) {
     if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEffectShadersEnabled(enabled != 0);
@@ -1028,4 +1041,36 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetEmissiveScale(uint32_t scene, float sc
 SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
     auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
     return rs ? rs->GetEmissiveScale() : 1.0f;
+}
+
+// ---- Camera lens and framing ----
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetFieldOfView(uint32_t scene, float degrees) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetFOV(degrees);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetFieldOfView(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetCameraFOV() : 0.0f;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetFramingScale(uint32_t scene, float scale) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetFramingScale(scale);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetFramingScale() : 0.0f;
+}
+
+// ---- Prep workers ----
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers) {
+    return WorkerPool::Get().SetLimit(workers);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetPrepWorkers(uint32_t* out_poolSize) {
+    auto& pool = WorkerPool::Get();
+    if (out_poolSize) *out_poolSize = pool.WorkerCount();
+    return pool.WorkerLimit();
 }

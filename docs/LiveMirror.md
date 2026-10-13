@@ -1,4 +1,4 @@
-# Live mirror (API 10)
+# Live mirror
 
 Read a live in-game actor, recreate it in a preview, and keep the preview in
 step with it every frame. The motivating case is a picture-in-picture face cam:
@@ -12,7 +12,7 @@ to show the window.
 ## API summary
 
 All calls are game main thread only. See `SkyrimRendererAPI.h`, section
-"Live mirror (API 10)", for the exact contract.
+"Live mirror", for the exact contract.
 
 | Call | What it does |
 |---|---|

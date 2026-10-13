@@ -46,6 +46,7 @@ struct PerMeshData {
     float pbrRoughnessScale = 1.0f;     // pbrParams.x (TruePBR)
     float pbrSpecularLevel = 0.04f;     // pbrParams.y
     float pbrDisplacementScale = 0.0f;  // pbrParams.z
+    bool solidCoverage = false;         // materialFlags.w: opaque / alpha-tested draw, the shader outputs alpha 1
 };
 
 /// Manages the preview shader pipeline: VS, PS, input layout, render states,

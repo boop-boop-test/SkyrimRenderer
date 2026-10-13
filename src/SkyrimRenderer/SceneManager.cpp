@@ -364,7 +364,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     {
         std::lock_guard lock(mutex_);
         for (auto& [id, actor] : actors_) {
-            if (!actor || !actor->IsHeadOnly()) continue;
+            if (!actor || !actor->HasDrivenHead()) continue;
             for (size_t i = 0; i < scenes.size(); ++i) {
                 if (&actor->GetScene() == scenes[i]) {
                     heads.push_back({actor.get(), i});
@@ -374,21 +374,27 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
         }
     }
 
-    struct Job { uint32_t head; uint32_t shape; uint32_t vertices = 0; float ms = 0.0f; };
+    struct Job { uint32_t head; uint32_t shape; uint32_t vertices = 0; uint32_t uploaded = 0; float ms = 0.0f; };
     std::vector<Job> jobs;
     std::vector<std::unique_lock<std::mutex>> headLocks;
     headLocks.reserve(heads.size());
     for (uint32_t h = 0; h < heads.size(); ++h) {
         headLocks.push_back(heads[h].actor->LockDrivenHead());
+        heads[h].actor->ValidateDrivenHeadLocked();
         const uint32_t shapes = heads[h].actor->DrivenShapeCount();
-        for (uint32_t s = 0; s < shapes; ++s) jobs.push_back({h, s});
+        for (uint32_t s = 0; s < shapes; ++s) {
+            jobs.push_back({h, s, heads[h].actor->DrivenShapeVertexCount(s)});
+        }
     }
+    // Largest shapes first: the head meshes dominate, and starting them first
+    // keeps one from landing last on a thread that already ran small ones.
+    std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.vertices > b.vertices; });
 
     const auto prepStart = Clock::now();
     try {
         WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
             const auto t0 = Clock::now();
-            jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
+            jobs[j].uploaded = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
             jobs[j].ms = ms(Clock::now() - t0);
         });
     } catch (...) {
@@ -402,7 +408,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     for (const auto& job : jobs) {
         auto& st = stats[heads[job.head].scene];
         st.prepCpuMs += job.ms;
-        st.verticesUploaded += job.vertices;
+        st.verticesUploaded += job.uploaded;
     }
     for (const auto& head : heads) {
         const auto t0 = Clock::now();

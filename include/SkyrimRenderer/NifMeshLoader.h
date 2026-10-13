@@ -83,6 +83,7 @@ enum class ShaderFlags : uint32_t {
     Decal             = 1 << 7,  // sf1 bit 26: SLSF1_DECAL — triggers DEPTH_WRITE_DECALS for HAIR technique
     DynamicDecal      = 1 << 8,  // sf1 bit 27: SLSF1_DYNAMIC_DECAL — engine-side depth bias for runtime decals
     OwnEmit           = 1 << 9,  // sf1 bit 22: SLSF1_OWN_EMIT — the material's emissive colour lights it
+    AnisoLighting     = 1 << 10, // sf2 bit 21: SLSF2_ANISOTROPIC_LIGHTING — anisotropic specular (hair strands)
 };
 
 /// BSEffectShaderProperty material (glows, flames, auras), drawn unlit after

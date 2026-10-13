@@ -1,4 +1,4 @@
-// SceneManager: held items, picking and highlight (API 10).
+// SceneManager: held items, picking and highlight.
 
 #include "SkyrimRenderer/SceneManager.h"
 #include "SkyrimRenderer/SkyrimRendererAPI.h"

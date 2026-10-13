@@ -12,6 +12,16 @@ namespace {
 
 constexpr float kDegToRadF = 3.14159265f / 180.0f;
 
+// HeadShot: head and neck fill the frame; hair counts up to 15% of the face
+// shape's height above it; 12% room for the idle pose (framed on bind pose).
+constexpr float kHeadShotHairCap = 0.15f;
+constexpr float kHeadShotMargin = 1.12f;
+// HeadShotLoose: up to 35% of hair above the face shape, the frame runs 12% of
+// it below the neck seam (shoulders just starting), and 30% room around.
+constexpr float kLooseHairCap = 0.35f;
+constexpr float kLooseBelowNeck = 0.12f;
+constexpr float kLooseMargin = 1.3f;
+
 std::string Lower(const std::string& s) {
     std::string out = s;
     for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -81,8 +91,18 @@ void CameraController::SetOrbit(float yaw, float pitch, float distance, float fo
 }
 
 void CameraController::SetFOV(float degrees) {
-    fov_ = std::clamp(degrees, 10.0f, 120.0f);
+    fov_ = std::isfinite(degrees) ? std::clamp(degrees, 10.0f, 120.0f) : 50.0f;
     dirty_ = true;
+}
+
+void CameraController::SetFramingScale(float scale) {
+    framingScale_ = std::isfinite(scale) ? std::clamp(scale, 0.5f, 3.0f) : 1.0f;
+}
+
+float CameraController::PresetDistanceScale() const {
+    // The radius multiples in SetPreset were tuned at 50 degrees.
+    static const float kDesignTanHalf = std::tan(25.0f * kDegToRadF);
+    return framingScale_ * kDesignTanHalf / std::max(std::tan(fov_ * 0.5f * kDegToRadF), 0.01f);
 }
 
 void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMesh>& meshes,
@@ -116,12 +136,13 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
     orbitCenterY_ = center.y;
     orbitCenterValid_ = true;
 
+    const float scale = PresetDistanceScale();
     switch (preset) {
         case CameraPreset::FullBody:
-            SetOrbit(0.0f, 5.0f, radius * 2.5f, center.z);
+            SetOrbit(0.0f, 5.0f, radius * 2.5f * scale, center.z);
             break;
         case CameraPreset::UpperBody:
-            SetOrbit(0.0f, 5.0f, radius * 1.5f, center.z + radius * 0.3f);
+            SetOrbit(0.0f, 5.0f, radius * 1.5f * scale, center.z + radius * 0.3f);
             break;
         case CameraPreset::Face: {
             // Pivot on head parts for accurate face framing.
@@ -164,16 +185,16 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
                 // Y (depth): head bone (true center of skull)
                 orbitCenterX_ = (eyeCenter.x + mouthCenter.x) * 0.5f;
                 orbitCenterY_ = headBonePos->y;
-                SetOrbit(0.0f, 5.0f, radius * 0.6f,
+                SetOrbit(0.0f, 5.0f, radius * 0.6f * scale,
                          (eyeCenter.z + mouthCenter.z) * 0.5f);
             } else if (headBonePos) {
                 // Head bone fallback for all axes
                 orbitCenterX_ = headBonePos->x;
                 orbitCenterY_ = headBonePos->y;
-                SetOrbit(0.0f, 5.0f, radius * 0.6f, headBonePos->z);
+                SetOrbit(0.0f, 5.0f, radius * 0.6f * scale, headBonePos->z);
             } else {
                 // Last resort: estimate from bounds
-                SetOrbit(0.0f, 5.0f, radius * 0.6f, center.z + radius * 0.7f);
+                SetOrbit(0.0f, 5.0f, radius * 0.6f * scale, center.z + radius * 0.7f);
             }
             break;
         }
@@ -183,11 +204,14 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
         case CameraPreset::FaceClose:
             if (!FrameFaceClose(meshes, pose)) FrameHeadShot(meshes, headBonePos, center, radius);
             break;
+        case CameraPreset::HeadShotLoose:
+            FrameHeadShot(meshes, headBonePos, center, radius, /*loose=*/true);
+            break;
     }
 }
 
 void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, const RE::NiPoint3* headBonePos,
-                                     const RE::NiPoint3& center, float radius) {
+                                     const RE::NiPoint3& center, float radius, bool loose) {
     // Head and neck fill the frame. The FaceGen face shape runs from
     // the neck seam to the crown; hair / eyes may add a little on top
     // (capped so long hair does not pull the frame down the back).
@@ -209,17 +233,20 @@ void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, cons
             orbitCenterX_ = headBonePos->x;
             orbitCenterY_ = headBonePos->y;
         }
-        SetOrbit(0.0f, 0.0f, 45.0f, z);
+        SetOrbit(0.0f, 0.0f, 45.0f * PresetDistanceScale() * (loose ? kLooseMargin / kHeadShotMargin : 1.0f), z);
         return;
     }
 
+    // Loose: hair may add more on top (up-dos, tall hair) and the frame runs a
+    // little below the neck seam, where the shoulders start.
     const float faceHeight = fMax[2] - fMin[2];
+    const float hairCap = loose ? kLooseHairCap : kHeadShotHairCap;
     float top = fMax[2];
     for (const auto& m : meshes) {
         if (m.shadingModel != ShadingModel::HairTint && m.shadingModel != ShadingModel::EyeEnvMap) continue;
-        top = std::max(top, std::min(m.boundsMax[2], fMax[2] + faceHeight * 0.15f));
+        top = std::max(top, std::min(m.boundsMax[2], fMax[2] + faceHeight * hairCap));
     }
-    const float bottom = fMin[2];
+    const float bottom = fMin[2] - (loose ? faceHeight * kLooseBelowNeck : 0.0f);
     const float height = top - bottom;
     const float width = fMax[0] - fMin[0];
     const float depth = fMax[1] - fMin[1];
@@ -227,10 +254,9 @@ void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, cons
     // Fit the taller of height / width into the vertical FOV (square
     // or wider targets get the same or more side room), measured at
     // the front of the face.
-    // 12% room: the portrait is posed (idle) after framing on the bind pose.
-    constexpr float kMargin = 1.12f;
+    const float margin = (loose ? kLooseMargin : kHeadShotMargin) * framingScale_;
     const float tanHalf = std::tan(fov_ * 0.5f * kDegToRadF);
-    const float fit = std::max(height, width) * 0.5f * kMargin / std::max(tanHalf, 0.01f);
+    const float fit = std::max(height, width) * 0.5f * margin / std::max(tanHalf, 0.01f);
 
     orbitCenterX_ = (fMin[0] + fMax[0]) * 0.5f;
     orbitCenterY_ = headBonePos ? headBonePos->y : (fMin[1] + fMax[1]) * 0.5f;
@@ -258,7 +284,7 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     constexpr float kNeckBand = 0.25f;
     // Frame = 1.3 x brows-to-chin (11.5% above the brows and below the chin).
     // Against HeadShot that is 1.79x closer (median; p10 1.68, p90 1.93).
-    constexpr float kMargin = 1.3f;
+    const float kMargin = 1.3f * framingScale_;
 
     // The parts: the FaceGen-shaded face (the largest such shape), the eyes
     // (eye shader), mouth and brows by head part name (FaceGen NIFs name each

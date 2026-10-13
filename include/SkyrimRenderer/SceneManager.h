@@ -273,10 +273,10 @@ public:
                                  const std::string& animationPath = "");
 
     /// Load only an actor's resolved head with drivable vertex arrays
-    /// (API v4). The arrays are uploaded before every render of the scene.
+    /// The arrays are uploaded before every render of the scene.
     ActorHandle LoadActorHead(SceneHandle scene, RE::FormID formID);
 
-    /// Load a live actor reference (API 10): LoadActorPreview, then one pose /
+    /// Load a live actor reference: LoadActorPreview, then one pose /
     /// expression snapshot from the live 3D, then the live mirror with
     /// `mirrorFlags` (SKYRIMRENDERER_MIRROR_*; 0 = keep the snapshot). Main thread.
     ActorHandle LoadActorFromReference(SceneHandle scene, RE::FormID refFormID, uint32_t mirrorFlags);

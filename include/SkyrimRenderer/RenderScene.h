@@ -25,6 +25,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -55,7 +56,15 @@ public:
     // ── Camera ──────────────────────────────────────────────────────────────
 
     void SetCamera(float yaw, float pitch, float distance, float focalHeight);
+    /// FOV / framing scale; when the camera is still on a preset (no SetCamera
+    /// or pan since), the preset is fitted again so the framing holds.
     void SetFOV(float fovDegrees);
+    void SetFramingScale(float scale);
+    float GetFramingScale() const;
+    /// Preset the camera is still on, if any. RestoreActivePreset puts the
+    /// marker back without refitting (after a temporary SetCamera).
+    std::optional<CameraPreset> GetActivePreset() const;
+    void RestoreActivePreset(std::optional<CameraPreset> preset);
     void SetCameraPreset(CameraPreset preset);
 
     float GetCameraYaw() const;
@@ -348,6 +357,9 @@ private:
     // Scene graph management
     void UpdateLightNodes();
 
+    /// CameraController::SetPreset with this scene's meshes, head bone and pose. Caller holds mutex_.
+    void ApplyPresetLocked(CameraPreset preset);
+
     // Build per-frame data for the shader pipeline
     PerFrameData BuildPerFrameData();
 
@@ -359,6 +371,7 @@ private:
     RenderTargetManager renderTarget_;
     ShaderPipeline shader_;
     CameraController camera_;
+    std::optional<CameraPreset> activePreset_;  // camera still on this preset (refit on FOV / framing)
     std::unique_ptr<MeshRenderer> meshRenderer_;
     std::unique_ptr<SceneLook> sceneLook_;
 
@@ -473,7 +486,7 @@ private:
     const BonePoseMap* gpuSkinningPose_ = nullptr;
 
     // Thread safety
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
 
 } // namespace SkyrimRenderer

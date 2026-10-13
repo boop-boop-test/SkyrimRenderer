@@ -103,33 +103,11 @@ extern "C" {
 
 // --- Version ---------------------------------------------------------------
 
-// API history (append-only; gate new calls on the version):
-//   1 - original surface
-//   2 - texture mode (SetSceneTextureMode, RenderToTexture, GetSceneTexture,
-//       Tick), device-lost guard (IsDeviceLost), RefreshLiveFace,
-//       IsPresentHookInstalled
-//   3 - GetBuildVersion; shaders default to the folder next to the DLL
-//   4 - drivable head: LoadActorHead, GetHeadShapeCount / Info, GetHeadSource,
-//       SetHeadDriveFlags
-//   5 - camera preset 3 = HeadShot (SetCameraPreset)
-//   6 - LoadActorHead draws every head but the player's live face on the race
-//       skeleton NIF's bind pose itself (where the camera presets frame it);
-//       before, clients called ApplyNifBindPose. A repeat call is harmless.
-//   7 - camera preset 4 = FaceClose (SetCameraPreset), build 1.5.0
-//   8 - per-mod state (build 1.7.0): callbacks are per calling mod and every
-//       mod's runs; Shutdown releases only the caller's scenes, actors,
-//       overlays and callbacks. No new calls; same signatures.
-//   9 - build 1.8.0: RenderToTextures (several scenes per call, driven-head
-//       vertex prep in parallel), GetLastRenderStats, Set/GetToneMapping
-//       (vanilla-style Reinhard tone mapping, on by default from 1.8.0);
-//       driven-head arrays may be written from any thread (see API v4).
-//  10 - build 1.9.0: export (turntables, animation strips, item previews,
-//       scaled PNG), scene look (ground shadow, self-shadow, SSAO, debug
-//       views), live mirror (actor from a reference, pose / face / equipment
-//       mirroring, expression morphs, face cam), held weapons, picking and
-//       highlight, materials (TruePBR, glow / emissive, effect shaders).
-//       Refraction shapes are no longer drawn.
-#define SKYRIMRENDERER_API_VERSION 10
+// API version. Nothing is released yet: the whole surface below is version 1
+// and may still change without a bump. From the first release on, bump it for
+// every addition and gate new calls on it. (The build version below is
+// separate and only orders installed copies for the loader.)
+#define SKYRIMRENDERER_API_VERSION 1
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -137,19 +115,17 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 // (major << 16) | (minor << 8) | patch. The same number is in the DLL's
 // Windows file version, which SkyrimRendererLoader.h compares to pick the
 // newest installed copy. Distinct from the API version above: builds add
-// fixes without changing the API. (API v3)
+// fixes without changing the API.
 #define SKYRIMRENDERER_PACK_VERSION(major, minor, patch) \
     ((static_cast<uint32_t>(major) << 16) | (static_cast<uint32_t>(minor) << 8) | static_cast<uint32_t>(patch))
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetBuildVersion(void);
 
 // --- Lifecycle -------------------------------------------------------------
 
-// One DLL serves every mod in the process. From API 8 it tracks which mod
-// (calling module) made each call: scenes and overlays belong to the mod that
-// created them, each mod has its own callbacks, and Shutdown releases only the
+// One DLL serves every mod in the process. It tracks which mod (calling
+// module) made each call: scenes and overlays belong to the mod that created
+// them, each mod has its own callbacks, and Shutdown releases only the
 // caller's. The Present hook and caches are shared and go with the last mod.
-// Before API 8 the callbacks and Shutdown were process-wide: on an older DLL,
-// only one composite consumer may set callbacks or call Shutdown.
 
 // Hook IDXGISwapChain::Present for frame-synced rendering and backbuffer
 // compositing (SetCompositeRect / overlays). Only composite consumers need it;
@@ -165,15 +141,15 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetShaderDirectory(const wchar_t* dir);
 SKYRIMRENDERER_API void SkyrimRenderer_PrecompileShaders(void);
 
 // Tear down the calling mod's scenes, actors, overlays and callbacks; the last
-// mod out also removes the Present hook and caches. (Before API 8: everything.)
+// mod out also removes the Present hook and caches.
 SKYRIMRENDERER_API void SkyrimRenderer_Shutdown(void);
 
 // Set/clear the calling mod's render-complete callback. Pass NULL to clear.
-// Readback pixels go to the mod that created the scene. (API 8: per mod.)
+// Readback pixels go to the mod that created the scene.
 SKYRIMRENDERER_API void SkyrimRenderer_SetRenderCompleteCallback(SkyrimRenderer_RenderCallback callback);
 
 // Set/clear the calling mod's per-frame callback. Pass NULL to clear. Every
-// mod's callback runs each frame. (API 8: per mod.)
+// mod's callback runs each frame.
 SKYRIMRENDERER_API void SkyrimRenderer_SetPerFrameCallback(SkyrimRenderer_FrameCallback callback);
 
 // --- Scene -----------------------------------------------------------------
@@ -198,8 +174,11 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadbackPixels(
 SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
     uint32_t scene, float yaw, float pitch, float distance, float focalHeight);
 
-// preset: 0=FullBody, 1=UpperBody, 2=Face, 3=HeadShot (API v5: head and neck fill
-// the frame, for portraits; earlier DLLs ignore 3), 4=FaceClose (API v7).
+// preset: 0=FullBody, 1=UpperBody, 2=Face, 3=HeadShot (head and neck fill the
+// frame, for portraits), 4=FaceClose, 5=HeadShotLoose (HeadShot with room
+// above the hair and the frame running just below the neck seam, where the
+// shoulders start). Unknown values are ignored. Every preset fits to the
+// scene's field of view and framing scale (SetFieldOfView / SetFramingScale).
 //
 // FaceClose: brows to chin fill the frame (1.3x their height, so the top of
 // the head and the ears may be cropped), centred on the eyes, level camera.
@@ -210,7 +189,6 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
 // vertices are not known. Measured on the head as drawn under the actor's
 // current pose, so call it after SetPose to frame the posed head. Without a
 // FaceGen face, eyes and a mouth (helmets, creatures) it frames as HeadShot.
-// DLLs before API v7 ignore 4.
 SKYRIMRENDERER_API void SkyrimRenderer_SetCameraPreset(uint32_t scene, uint32_t preset);
 
 SKYRIMRENDERER_API void SkyrimRenderer_PanCamera(uint32_t scene, float dx, float dy);
@@ -331,8 +309,8 @@ SKYRIMRENDERER_API void     SkyrimRenderer_SetAnimationLooping(uint32_t actor, i
 SKYRIMRENDERER_API void     SkyrimRenderer_SetSkipBindCorrection(uint32_t actor, int32_t skip);
 SKYRIMRENDERER_API void     SkyrimRenderer_SetUseRefPoseLocals(uint32_t actor, int32_t use);
 // Pose the actor on its race skeleton NIF's bind pose (no animation).
-// Idempotent. Head actors other than the player's get it at load (API v6),
-// full actor previews whenever they have no animation pose (build 1.4.1).
+// Idempotent. Head actors other than the player's get it at load, full actor
+// previews whenever they have no animation pose.
 SKYRIMRENDERER_API void     SkyrimRenderer_ApplyNifBindPose(uint32_t actor);
 
 SKYRIMRENDERER_API void     SkyrimRenderer_GetAnimationState(
@@ -384,7 +362,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_PreloadBodyMeshes(void);
 SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void);
 
 // ===========================================================================
-// API v2 (gate on SkyrimRenderer_GetAPIVersion() >= 2)
+// Texture mode, device-lost guard, live face
 // ===========================================================================
 //
 // Texture mode is for consumers that sample the scene texture themselves (a
@@ -401,8 +379,11 @@ SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void);
 //
 // Output contract (texture mode): DXGI_FORMAT_R8G8B8A8_TYPELESS texture on the
 // engine device, UNORM SRV, one mip level, sRGB-encoded colour, premultiplied
-// alpha (the clear is premultiplied, opaque writes carry alpha 1; alpha-tested
-// cutout pixels keep their straight alpha). Keep the scene within about 2x the
+// alpha (the clear is premultiplied). Opaque and alpha-tested (cutout) materials
+// write coverage, not their texture alpha: as in the game, the alpha test only
+// decides which pixels survive, and every surviving pixel carries alpha 1. Only
+// alpha-blended materials write fractional alpha. This holds on the native and
+// the Community Shaders path alike. Keep the scene within about 2x the
 // CSS box it is shown in: it is sampled bilinearly with no mips.
 
 // Texture mode on/off for a scene. On: premultiplied output, RequestRender
@@ -439,7 +420,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_IsDeviceLost(uint32_t* out_reason);
 SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor);
 
 // ===========================================================================
-// API v4: drivable head (gate on SkyrimRenderer_GetAPIVersion() >= 4)
+// Drivable head
 // ===========================================================================
 //
 // LoadActorHead loads only an actor's resolved head (face + head parts; no
@@ -458,20 +439,27 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor);
 //                   with SKYRIMRENDERER_HEAD_DRIVE_OFFSETS.
 //   restPositions:  the loaded positions, read-only.
 //
-// Pointers stay valid until DestroyActorPreview. A head preview never rebuilds
-// itself (Equip* / RebuildWithCurrentOutfit are refused on it). The other calls
-// here are game main thread only. Before API 9: write the arrays on the thread
-// that renders. From API 9 any thread may write them, as long as the write
-// finishes before the render that should show it starts (e.g. the workers are
-// joined before RenderToTexture(s) is called), no render of that actor's scene
-// runs while writing, and SetHeadDriveFlags / DestroyActorPreview are not
-// called concurrently.
+// Full actor previews (LoadActorPreview) have the same driven head once
+// SetHeadDriveFlags is called on them (off until then: no cost): the FaceGen
+// face and the head parts, never armor or the body. Their shapes are rebuilt,
+// and the arrays reset, whenever the preview rebuilds its meshes (Equip*,
+// RebuildWithCurrentOutfit, live mirror EQUIPMENT) or a head mesh is added or
+// removed (a hood hiding the hair): GetHeadShapeGeneration then changes, and
+// shape indices and positions pointers from before must be fetched again.
 //
-// Pose (API v6): the shapes are skinned on the race skeleton NIF's bind pose,
-// so a head is drawn where the camera presets frame it whatever space its NIF
+// Pointers stay valid until DestroyActorPreview (on a full preview: until the
+// generation changes). A head preview never rebuilds itself (Equip* /
+// RebuildWithCurrentOutfit are refused on it). The other calls
+// here are game main thread only. Any thread may write the arrays, as long
+// as the write finishes before the render that should show it starts (e.g.
+// the workers are joined before RenderToTexture(s) is called), no render of
+// that actor's scene runs while writing, and SetHeadDriveFlags /
+// DestroyActorPreview are not called concurrently.
+//
+// Pose: the shapes are skinned on the race skeleton NIF's bind pose, so a
+// head is drawn where the camera presets frame it whatever space its NIF
 // stores vertices in. The player's live face (HEAD_SOURCE_PLAYER) is drawn as
-// stored, as its positions are. Before v6 no pose was set: clients called
-// ApplyNifBindPose after LoadActorHead for non-player heads.
+// stored, as its positions are.
 
 #define SKYRIMRENDERER_HEAD_TEXT 260
 
@@ -535,8 +523,12 @@ struct SkyrimRenderer_HeadSourceInfo {
 // (DestroyActorPreview frees it), 0 on failure.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorHead(uint32_t scene, uint32_t formID);
 
-// Shapes of a head actor (0 for anything else).
+// Shapes of a head actor, or of a full preview with a driven head (0 otherwise).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeCount(uint32_t actor);
+
+// Changes whenever the driven shapes are rebuilt (see above); 0 for an unknown
+// actor. Compare it before reusing shape indices or positions pointers.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor);
 
 // Fill out (out->structSize must be set). Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
@@ -546,12 +538,29 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRenderer_HeadSourceInfo* out);
 
 // SKYRIMRENDERER_HEAD_DRIVE_* for every shape of a head actor. Changing
-// OFFSETS resets every positions[] array (to rest, or to zeros).
+// OFFSETS resets every positions[] array (to rest, or to zeros). On a full
+// preview the first call builds the driven head (arrays per these flags).
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags);
 
+// Turn a bone after the pose: a model-space rotation applied to the bone and
+// every bone under it after each pose (animation sample, bind pose, live
+// mirror), about the bone's own position. For the bones under it that is
+// local' = parent^T * R * parent * local, as the game's FaceModulator-style
+// head turns do, so skin weights blend the neck and a helmet follows the head.
+// modelRot: 9 floats, row-major, column-vector convention (NiMatrix3
+// entry[row][col]; v' = R * v). NULL clears the bone; boneName NULL or ""
+// clears every bone. Returns 1, or 0 for a bone the skeleton does not have or
+// a non-finite matrix. Game main thread; GPU-skinned previews (the default).
+//
+// Preview / model space is the game's actor space: +Y forward (where the
+// actor faces), +Z up, +X the actor's right. A yaw-0 camera sits on +Y looking
+// at the actor, so the actor's right (+X) is on the image's left. Camera
+// presets measure the head when called: set the camera before turning it.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetBoneRotation(uint32_t actor, const char* boneName,
+                                                          const float* modelRot);
+
 // ===========================================================================
-// API v9: batched render, render stats, tone mapping
-// (gate on SkyrimRenderer_GetAPIVersion() >= 9)
+// Batched render, render stats, tone mapping
 // ===========================================================================
 
 // RenderToTexture for several scenes in one call (texture-mode rules: game
@@ -603,8 +612,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float expo
 // Any out pointer may be NULL. Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
 
-// ---- Export (API 10) ----
-// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+// ---- Export ----
 //
 // Paths are UTF-8. Parent directories are created. Exports render into their
 // own temporary render targets: the scene's size, texture (GetSceneTexture
@@ -753,9 +761,9 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportPNGScaled(uint32_t scene, const
 // are not applied. Returns the number of shapes loaded, 0 on failure.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint32_t formID, uint32_t flags);
 
-// ---- Scene look (API 10) ----
+// ---- Scene look ----
 // Ground contact shadow, key light self-shadowing, SSAO and debug views, per
-// scene. All off by default; off leaves the output identical to API 9. They
+// scene. All off by default (no change to the output when off). They
 // apply to the built-in preview shaders: meshes drawn by the Community
 // Shaders path get no self-shadow / AO, and debug views draw every mesh with
 // the built-in shaders. Settings take effect on the next render; any thread.
@@ -829,8 +837,7 @@ struct SkyrimRenderer_SceneLookState {
 // scene or a too-small struct.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out);
 
-// ---- Live mirror (API 10) ----
-// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+// ---- Live mirror ----
 //
 // Read a live in-game actor (the player or any loaded NPC) and recreate it in
 // a preview, then keep the preview in step with it every frame: skeleton pose
@@ -961,7 +968,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_CreateLiveFaceCam(uint32_t refFormID, 
 // Destroy a face cam's scene, its actor and its mirror (DestroyScene).
 SKYRIMRENDERER_API void SkyrimRenderer_DestroyLiveFaceCam(uint32_t scene);
 
-// ---- Equipment & picking (API 10) ----
+// ---- Equipment & picking ----
 //
 // Held items: weapons (WEAP: swords, daggers, axes, maces, two-handers, bows,
 // crossbows, staffs), torches (LIGH), ammo (AMMO: the quiver model) and
@@ -1089,7 +1096,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
 // highlight of the actor).
 SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID);
 
-// ---- Materials (API 10) ----
+// ---- Materials ----
 //
 // TruePBR meshes (Community Shaders PBR: the kMenuScreen shader flag that PBR
 // NIF patchers / ParallaxGen set) are shaded as metallic/roughness PBR from
@@ -1108,8 +1115,8 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t f
 // after the lit passes: source texture x emissive colour x multiple, greyscale
 // palette, view-angle falloff, the NiAlphaProperty's blend (additive, alpha,
 // multiply), depth test on, depth write off. Shapes without a source texture
-// or without blending are never drawn. Default 1 (on); 0 hides them, as builds
-// before API 10 did. Effect shapes never move the camera presets' framing.
+// or without blending are never drawn. Default 1 (on); 0 hides them. Effect
+// shapes never move the camera presets' framing.
 SKYRIMRENDERER_API void    SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled);
 // 1/0; 0 for an unknown scene.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene);
@@ -1120,5 +1127,31 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene
 SKYRIMRENDERER_API void    SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale);
 // 1.0 for an unknown scene.
 SKYRIMRENDERER_API float   SkyrimRenderer_GetEmissiveScale(uint32_t scene);
+
+// ---- Camera lens and framing ----
+// Vertical field of view of a scene, degrees (10-120; default 50). Narrower =
+// less perspective (a portrait lens is ~20-25): the presets back the camera
+// off to keep the same framing. If the camera is still on the last preset
+// (no SetCamera / PanCamera since), the preset is fitted again at once;
+// otherwise the new FOV applies to the current orbit as it is.
+SKYRIMRENDERER_API void  SkyrimRenderer_SetFieldOfView(uint32_t scene, float degrees);
+SKYRIMRENDERER_API float SkyrimRenderer_GetFieldOfView(uint32_t scene);  // 0 for an unknown scene
+// Room a preset leaves around its subject: 1 = as designed, 1.25 = the subject
+// fills 1/1.25 as much of the frame (0.5-3). Same refit rule as the FOV.
+SKYRIMRENDERER_API void  SkyrimRenderer_SetFramingScale(uint32_t scene, float scale);
+SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene);  // 0 for an unknown scene
+
+// ---- Prep workers ----
+// Driven-head vertex prep runs on a small worker pool plus the calling thread
+// (see RenderToTextures). Process-wide tuning, shared by every mod: cap the
+// workers it may use. 0 = all prep on the calling thread; at most the pool
+// size; negative = back to the default. The default is half the physical
+// cores minus one, at most 3 (more workers than that raised total CPU with no
+// faster prep in game). Returns the cap now in effect. Any thread; applies
+// from the next render.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers);
+// Current cap; out_poolSize (optional) gets the pool size (hardware threads - 2,
+// at most 6; 0 on a machine with too few cores to have a pool).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetPrepWorkers(uint32_t* out_poolSize);
 
 } // extern "C"

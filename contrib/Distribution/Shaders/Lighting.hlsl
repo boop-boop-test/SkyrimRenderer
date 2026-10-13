@@ -91,7 +91,9 @@ float3 GetHairAnisotropicSpecular(float3 lightDir, float3 lightColor,
 }
 
 // ── Non-hair Anisotropic Lighting (from reference AnisotropicLighting.hlsl) ─
-// Single-lobe aniso specular for non-hair ANISO_LIGHTING meshes.
+// Single-lobe aniso specular for non-hair ANISO_LIGHTING meshes. Vanilla
+// (Community Shaders VanillaSpecular): 0.7 * pow(aniso, shininess) * max(0, L.z),
+// times the light colour; no N.L.
 
 float3 GetAnisotropicLighting(float3 lightDir, float3 lightColor,
                               float specHardness, float3 V, float3 N,
@@ -101,9 +103,7 @@ float3 GetAnisotropicLighting(float3 lightDir, float3 lightColor,
 
     float anisoIntensity = 1.0 - min(1.0, abs(dot(anisoDir, lightDir) - dot(anisoDir, H)));
     float spec = 0.7 * pow(anisoIntensity, specHardness);
-
-    float NdotL = saturate(dot(N, lightDir));
-    return lightColor * spec * NdotL;
+    return lightColor * spec * max(0.0, lightDir.z);
 }
 
 // ── Per-light diffuse accumulator ───────────────────────────────────────────
@@ -151,8 +151,10 @@ float3 GetDirectionalDiffuse(float3 lightDir, float3 lightColor, float3 N,
 
 // ── Main accumulation entry point ───────────────────────────────────────────
 // Sums diffuse + specular from all 3 lights.
-// Hair specular uses HairAnisotropicSpecular with tint vertex color.
-// Non-hair uses standard Blinn-Phong.
+// Specular as vanilla picks it: ANISO_LIGHTING meshes (SLSF2 bit 21) get the
+// anisotropic lobe(s) — hair the dual-lobe HairAnisotropicSpecular with the
+// tint vertex colour, anything else the single lobe — and every other mesh,
+// hair technique included (vanilla beards, brows), Blinn-Phong.
 
 void AccumulateLights(
     float3 N, float3 V, float2 uv,
@@ -160,7 +162,7 @@ void AccumulateLights(
     bool hasSpecular,
     bool useSoftLighting, bool useRimLighting, bool useBackLighting,
     bool hasSKTex, bool hasBacklightTex,
-    bool isHair, float3 hairTintVC,
+    bool isHair, bool isAniso, float3 hairTintVC,
     out float3 diffuseLight, out float3 specularLight)
 {
     diffuseLight = float3(0, 0, 0);
@@ -190,10 +192,13 @@ void AccumulateLights(
 
         // Specular — only when FLAG_SPECULAR is set (matches vanilla #ifdef SPECULAR)
         if (hasSpecular) {
-            if (isHair) {
+            if (isAniso && isHair) {
                 specularLight += GetHairAnisotropicSpecular(
                     lights[i], scaledColor, specHardness,
                     V, N, vertexNormal, hairTintVC);
+            } else if (isAniso) {
+                specularLight += GetAnisotropicLighting(
+                    lights[i], scaledColor, specHardness, V, N, vertexNormal);
             } else {
                 specularLight += GetBlinnPhongSpecular(
                     lights[i], scaledColor, specHardness, V, N);

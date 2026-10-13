@@ -1,4 +1,4 @@
-// RenderScene: picking and highlight (API 10).
+// RenderScene: picking and highlight.
 //
 // Both run off one mesh-ID pass (PickRenderer). Nothing is drawn while no pick
 // is pending and no highlight is set, so scenes that never use them keep the
