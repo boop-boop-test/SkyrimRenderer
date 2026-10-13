@@ -9,6 +9,7 @@
 #include "SkyrimRenderer/ExportEncoders.h"
 #include "SkyrimRenderer/ItemPreview.h"
 #include "SkyrimRenderer/TurntableExporter.h"
+#include "SkyrimRenderer/WorkerPool.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -1028,4 +1029,16 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetEmissiveScale(uint32_t scene, float sc
 SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
     auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
     return rs ? rs->GetEmissiveScale() : 1.0f;
+}
+
+// ---- Prep workers (API 10) ----
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers) {
+    return WorkerPool::Get().SetLimit(workers);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetPrepWorkers(uint32_t* out_poolSize) {
+    auto& pool = WorkerPool::Get();
+    if (out_poolSize) *out_poolSize = pool.WorkerCount();
+    return pool.WorkerLimit();
 }
