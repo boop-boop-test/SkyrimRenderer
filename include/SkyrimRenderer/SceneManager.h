@@ -269,6 +269,11 @@ public:
     /// (API v4). The arrays are uploaded before every render of the scene.
     ActorHandle LoadActorHead(SceneHandle scene, RE::FormID formID);
 
+    /// Load a live actor reference (API 10): LoadActorPreview, then one pose /
+    /// expression snapshot from the live 3D, then the live mirror with
+    /// `mirrorFlags` (SKYRIMRENDERER_MIRROR_*; 0 = keep the snapshot). Main thread.
+    ActorHandle LoadActorFromReference(SceneHandle scene, RE::FormID refFormID, uint32_t mirrorFlags);
+
     /// Get an actor preview by handle.
     ActorPreview* GetActorPreview(ActorHandle handle);
 
@@ -361,6 +366,10 @@ private:
 
     /// Processes all pending render requests. Called from Tick().
     void ProcessPendingRenders();
+
+    /// Step every live mirror (main thread) and queue a render for the shown
+    /// scenes (composited or texture mode) whose preview changed. From Tick().
+    void TickLiveMirrors(float deltaSeconds);
 
     /// Composite ALL scenes with active composite rects into the engine's
     /// framebuffer. Called every frame from HookedPresent.

@@ -71,6 +71,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/CommunityShaders.h
     include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
+    include/SkyrimRenderer/FaceMorphs.h
+    include/SkyrimRenderer/LiveMirror.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -102,6 +104,9 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SplineDecompressor.cpp
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
+    src/SkyrimRenderer/FaceMorphs.cpp
+    src/SkyrimRenderer/LiveMirror.cpp
+    src/SkyrimRenderer/LiveMirrorAPI.cpp
     src/SkyrimRenderer/WorkerPool.cpp
 )
 
