@@ -1,4 +1,5 @@
 #include "SkyrimRenderer/SkyrimRendererAPI.h"
+#include "SkyrimRenderer/GpuWork.h"
 #include "SkyrimRenderer/SceneManager.h"
 #include "SkyrimRenderer/ActorPreview.h"
 #include "SkyrimRenderer/TextureCache.h"
@@ -174,6 +175,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_PrecompileShaders(void) {
 SKYRIMRENDERER_API void SkyrimRenderer_Shutdown(void) {
     const auto consumer = SKYRIMRENDERER_CALLER;
     TurntableExporter::Get().Shutdown(consumer);
+    GpuWork::Get().Shutdown(consumer);
     SceneManager::GetInstance().Shutdown(consumer);
 }
 

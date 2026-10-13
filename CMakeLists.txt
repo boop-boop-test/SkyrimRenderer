@@ -85,6 +85,7 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/RigidMeshLoader.h
     include/SkyrimRenderer/MaterialSetup.h
     include/SkyrimRenderer/EffectShaderPass.h
+    include/SkyrimRenderer/GpuWork.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -128,6 +129,8 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/RigidMeshLoader.cpp
     src/SkyrimRenderer/SceneManagerPicking.cpp
     src/SkyrimRenderer/WorkerPool.cpp
+    src/SkyrimRenderer/GpuWork.cpp
+    src/SkyrimRenderer/GpuWorkAPI.cpp
     src/SkyrimRenderer/SceneLook.cpp
     src/SkyrimRenderer/ShadowPass.cpp
     src/SkyrimRenderer/SSAOPass.cpp

@@ -1,4 +1,5 @@
 #include "SkyrimRenderer/SceneManager.h"
+#include "SkyrimRenderer/GpuWork.h"
 #include "SkyrimRenderer/DX11StateGuard.h"
 #include "SkyrimRenderer/CommunityShaders.h"
 #include "SkyrimRenderer/HKXLoader.h"
@@ -156,6 +157,9 @@ void SceneManager::Tick() {
         tasks.swap(tickTasks_);
     }
     for (auto& task : tasks) task();
+
+    // GPU material instances due this frame (also reports device loss to them).
+    GpuWork::Get().Flush();
 
     if (IsDeviceLost()) return;
 
