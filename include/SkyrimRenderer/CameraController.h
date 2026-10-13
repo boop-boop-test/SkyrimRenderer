@@ -28,7 +28,11 @@ struct ProjectionWindow {
 class CameraController {
 public:
     void SetOrbit(float yaw, float pitch, float distance, float focalHeight);
+    /// Vertical field of view, degrees (10-120, default 50). Presets fit to it.
     void SetFOV(float degrees);
+    /// Scales how much room a preset leaves around its subject: 1 = as
+    /// designed, above 1 = more room (0.5-3). Presets read it when applied.
+    void SetFramingScale(float scale);
     /// `pose`: the scene's GPU-skinning pose, if any. FaceClose frames the
     /// head where that pose draws it (call after SetPose); the other presets
     /// ignore it.
@@ -63,6 +67,7 @@ public:
     float GetDistance() const { return distance_; }
     float GetFocalHeight() const { return focalHeight_; }
     float GetFOV() const { return fov_; }
+    float GetFramingScale() const { return framingScale_; }
 
     bool IsDirty() const { return dirty_; }
     void MarkDirty() { dirty_ = true; }
@@ -76,7 +81,10 @@ private:
                             RE::NiPoint3& outCenter, float& outRadius) const;
 
     void FrameHeadShot(const std::vector<LoadedMesh>& meshes, const RE::NiPoint3* headBonePos,
-                       const RE::NiPoint3& center, float radius);
+                       const RE::NiPoint3& center, float radius, bool loose = false);
+    /// Distance factor that keeps a radius-based preset's framing (designed
+    /// at 50 degrees) at the current FOV, times the framing scale.
+    float PresetDistanceScale() const;
     /// False (camera untouched) without a FaceGen face, eyes and a mouth.
     bool FrameFaceClose(const std::vector<LoadedMesh>& meshes, const BonePoseMap* pose);
 
@@ -85,6 +93,7 @@ private:
     float distance_ = 300.0f;
     float focalHeight_ = 85.0f;
     float fov_ = 50.0f;
+    float framingScale_ = 1.0f;
     bool dirty_ = true;
 
     RE::NiPoint3 cameraPosition_;

@@ -70,8 +70,10 @@ enum class CameraPreset {
     UpperBody,   // Waist up
     Face,        // Close-up on face
     HeadShot,    // Portrait: head and neck fill the frame (fits the face mesh)
-    FaceClose    // Portrait: brows to chin fill the frame; HeadShot without eyes / mouth / face
+    FaceClose,   // Portrait: brows to chin fill the frame; HeadShot without eyes / mouth / face
+    HeadShotLoose // Portrait: HeadShot with room above the hair, shoulders just starting
 };
+inline constexpr uint32_t kCameraPresetCount = 6;
 
 /// ENB rendering mode
 enum class ENBMode {

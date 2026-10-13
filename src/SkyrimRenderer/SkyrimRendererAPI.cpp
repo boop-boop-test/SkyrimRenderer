@@ -247,6 +247,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetCameraPreset(uint32_t scene, uint32_t preset) {
+    if (preset >= kCameraPresetCount) return;
     SceneManager::GetInstance().SetCameraPreset(ToScene(scene), ToCamPreset(preset));
 }
 
@@ -1029,6 +1030,26 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetEmissiveScale(uint32_t scene, float sc
 SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
     auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
     return rs ? rs->GetEmissiveScale() : 1.0f;
+}
+
+// ---- Camera lens and framing (API 10) ----
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetFieldOfView(uint32_t scene, float degrees) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetFOV(degrees);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetFieldOfView(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetCameraFOV() : 0.0f;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetFramingScale(uint32_t scene, float scale) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetFramingScale(scale);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetFramingScale() : 0.0f;
 }
 
 // ---- Prep workers (API 10) ----

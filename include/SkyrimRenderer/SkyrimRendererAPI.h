@@ -127,7 +127,9 @@ extern "C" {
 //       scaled PNG), scene look (ground shadow, self-shadow, SSAO, debug
 //       views), live mirror (actor from a reference, pose / face / equipment
 //       mirroring, expression morphs, face cam), held weapons, picking and
-//       highlight, materials (TruePBR, glow / emissive, effect shaders).
+//       highlight, materials (TruePBR, glow / emissive, effect shaders),
+//       camera field of view / framing scale and preset 5 HeadShotLoose,
+//       prep worker cap.
 //       Refraction shapes are no longer drawn.
 #define SKYRIMRENDERER_API_VERSION 10
 
@@ -199,7 +201,11 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetCamera(
     uint32_t scene, float yaw, float pitch, float distance, float focalHeight);
 
 // preset: 0=FullBody, 1=UpperBody, 2=Face, 3=HeadShot (API v5: head and neck fill
-// the frame, for portraits; earlier DLLs ignore 3), 4=FaceClose (API v7).
+// the frame, for portraits; earlier DLLs ignore 3), 4=FaceClose (API v7),
+// 5=HeadShotLoose (API v10: HeadShot with room above the hair and the frame
+// running just below the neck seam, where the shoulders start). Unknown
+// values are ignored. Every preset fits to the scene's field of view and
+// framing scale (SetFieldOfView / SetFramingScale, API v10).
 //
 // FaceClose: brows to chin fill the frame (1.3x their height, so the top of
 // the head and the ears may be cropped), centred on the eyes, level camera.
@@ -1120,6 +1126,19 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene
 SKYRIMRENDERER_API void    SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale);
 // 1.0 for an unknown scene.
 SKYRIMRENDERER_API float   SkyrimRenderer_GetEmissiveScale(uint32_t scene);
+
+// ---- Camera lens and framing (API 10) ----
+// Vertical field of view of a scene, degrees (10-120; default 50). Narrower =
+// less perspective (a portrait lens is ~20-25): the presets back the camera
+// off to keep the same framing. If the camera is still on the last preset
+// (no SetCamera / PanCamera since), the preset is fitted again at once;
+// otherwise the new FOV applies to the current orbit as it is.
+SKYRIMRENDERER_API void  SkyrimRenderer_SetFieldOfView(uint32_t scene, float degrees);
+SKYRIMRENDERER_API float SkyrimRenderer_GetFieldOfView(uint32_t scene);  // 0 for an unknown scene
+// Room a preset leaves around its subject: 1 = as designed, 1.25 = the subject
+// fills 1/1.25 as much of the frame (0.5-3). Same refit rule as the FOV.
+SKYRIMRENDERER_API void  SkyrimRenderer_SetFramingScale(uint32_t scene, float scale);
+SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene);  // 0 for an unknown scene
 
 // ---- Prep workers (API 10) ----
 // Driven-head vertex prep runs on a small worker pool plus the calling thread
