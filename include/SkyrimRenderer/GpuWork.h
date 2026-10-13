@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,6 +50,7 @@ public:
     uint32_t Load(ConsumerId caller, const char* dataPath);
     bool TextureInfo(ConsumerId caller, uint32_t texture, uint32_t* width, uint32_t* height, uint32_t* mips,
                      void** srv, void** engineTexture);
+    uint32_t Save(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path);
 
     /// Runs every due instance. Game main thread, inside the frame.
     void Flush();
@@ -109,6 +111,16 @@ private:
         uint64_t version = 0;           // bumped whenever its contents change
     };
 
+    /// One-shot readback of a texture mip to a PNG file.
+    struct SaveJob : Object {
+        std::shared_ptr<Texture> texture;
+        uint32_t mip = 0;
+        std::filesystem::path path;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+        uint32_t width = 0, height = 0;
+        bool copied = false, writing = false;
+    };
+
     struct Override {
         std::vector<uint8_t> bytes;
         uint32_t count = 0;
@@ -150,6 +162,8 @@ private:
     void Run(Instance& instance, ID3D11Device* device, ID3D11DeviceContext* ctx,
              const std::vector<std::pair<std::string, std::shared_ptr<Texture>>>& inputs);
     bool MakeEngineTexture(Texture& texture, uint32_t handle);
+    bool CopyForSave(SaveJob& save, ID3D11Device* device, ID3D11DeviceContext* ctx);
+    void CollectSave(const std::shared_ptr<SaveJob>& save, ID3D11DeviceContext* ctx);
     void ReleaseLocked(uint32_t handle);
     void EnsureSamplers(ID3D11Device* device);
 
@@ -158,6 +172,9 @@ private:
     std::unordered_map<uint32_t, std::shared_ptr<Material>> materials_;
     std::unordered_map<uint32_t, std::shared_ptr<Instance>> instances_;
     std::unordered_map<uint32_t, std::shared_ptr<Texture>> textures_;
+    std::unordered_map<uint32_t, std::shared_ptr<SaveJob>> saves_;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> copyShader_;  // any texture mip -> RGBA8 (for saves)
+    Microsoft::WRL::ComPtr<ID3D11Buffer> copyParams_;
     std::array<Microsoft::WRL::ComPtr<ID3D11SamplerState>, 4> samplers_;
     /// Engine objects are released on the main thread only (Flush).
     std::vector<RE::NiPointer<RE::NiSourceTexture>> engineReleases_;

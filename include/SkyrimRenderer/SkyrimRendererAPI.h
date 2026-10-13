@@ -1348,7 +1348,8 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetGpuInstanceRunCount(uint32_t insta
 //   SRV:     an ID3D11ShaderResourceView* on the engine device.
 //   Engine:  an RE::NiSourceTexture* (its renderer texture's SRV).
 //   Load:    a Data-relative DDS path ("textures\\actors\\..."), loaded on a
-//            renderer thread (BSA or loose; BC formats are fine).
+//            renderer thread (BSA or loose; BC formats are fine). In the
+//            out-of-game test tools: a file path (DDS, or PNG via WIC).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapGpuTextureSRV(void* d3d11ShaderResourceView);
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapGpuTextureEngine(void* niSourceTexture);
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadGpuTexture(const char* dataPath);
@@ -1360,6 +1361,19 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadGpuTexture(const char* dataPath);
 //     the wrapped object for WrapGpuTextureEngine; else NULL). See below.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuTexture(uint32_t texture, uint32_t* width, uint32_t* height,
                                                          uint32_t* mipLevels, void** srv, void** engineTexture);
+
+// One-shot save of a texture mip to a PNG file, for checking results and
+// calibration; never per frame. At the next flush (after that flush's runs,
+// so it sees a parameter change made just before) the mip is copied, then
+// read back once the GPU has finished (no wait) and written on a renderer
+// thread. Any texture: outputs, wrapped and loaded inputs (BC decoded).
+// RGBA8, colour space as stored (an sRGB view's values are re-encoded).
+// utf8Path: absolute, or relative to the game folder; folders are created.
+// Returns a save handle (0 for a bad texture or path): PENDING until the file
+// is written, then READY, or FAILED with GetGpuError. Logged to
+// SkyrimRenderer.log. Destroy it with DestroyGpuObject when done (Shutdown
+// does too).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SaveGpuTexture(uint32_t texture, uint32_t mip, const char* utf8Path);
 
 // Engine textures (outputs with engineTexture = 1). EXPERIMENTAL until
 // verified in game (NTJH issue 165, gate 1): engineTexture stays NULL and the

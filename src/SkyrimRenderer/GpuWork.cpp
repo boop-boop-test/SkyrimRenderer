@@ -3,7 +3,11 @@
 // SkyrimRendererAPI.h "GPU materials".
 
 #include "SkyrimRenderer/GpuWork.h"
+#include "SkyrimRenderer/ExportEncoders.h"
 #include "SkyrimRenderer/TextureCache.h"
+#include "SkyrimRenderer/TextureLoader.h"
+
+#include <DDSTextureLoader.h>
 
 #include <SKSE/SKSE.h>
 #include <d3dcompiler.h>
@@ -159,6 +163,7 @@ std::shared_ptr<T> GpuWork::Find(std::unordered_map<uint32_t, std::shared_ptr<T>
 }
 
 GpuWork::Object* GpuWork::FindAny(ConsumerId caller, uint32_t handle) {
+    if (auto s = Find(saves_, caller, handle)) return s.get();
     if (auto m = Find(materials_, caller, handle)) return m.get();
     if (auto i = Find(instances_, caller, handle)) return i.get();
     if (auto t = Find(textures_, caller, handle)) return t.get();
@@ -212,6 +217,7 @@ void GpuWork::ReleaseLocked(uint32_t handle) {
         instance->outputsRequested = false;
         return;
     }
+    saves_.erase(handle);
     materials_.erase(handle);
 }
 
@@ -235,6 +241,9 @@ void GpuWork::Shutdown(ConsumerId consumer) {
     }
     for (const auto& [h, m] : materials_) {
         if (m->owner == consumer) handles.push_back(h);
+    }
+    for (const auto& [h, s] : saves_) {
+        if (s->owner == consumer) handles.push_back(h);
     }
     for (auto h : handles) ReleaseLocked(h);
 }
@@ -650,7 +659,20 @@ uint32_t GpuWork::Load(ConsumerId caller, const char* dataPath) {
     }
     std::thread([this, t, path = std::string(dataPath)] {
         auto* device = EngineDevice();
-        auto srv = device ? TextureCache::GetInstance().Get(path, device, false) : nullptr;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        if (device && g_testDevice) {
+            // Outside the game there is no Data folder: a loose file path.
+            const auto file = ExportEncoders::PathFromUtf8(path.c_str());
+            auto ext = file.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".dds") {
+                DirectX::CreateDDSTextureFromFile(device, file.wstring().c_str(), nullptr, srv.GetAddressOf());
+            } else {
+                srv = LoadTextureFromFile(device, file.wstring().c_str());
+            }
+        } else if (device) {
+            srv = TextureCache::GetInstance().Get(path, device, false);
+        }
         std::lock_guard lock(mutex_);
         if (t->status != SKYRIMRENDERER_GPU_PENDING || t->destroyed) return;
         if (!srv || !Describe(srv.Get(), t->width, t->height, t->mips, t->srgb)) {
@@ -1060,7 +1082,7 @@ void GpuWork::Run(Instance& instance, ID3D11Device* device, ID3D11DeviceContext*
 void GpuWork::Flush() {
     std::lock_guard lock(mutex_);
     engineReleases_.clear();  // main thread: engine objects may be destroyed here
-    if (instances_.empty()) return;
+    if (instances_.empty() && saves_.empty()) return;
 
     if (!g_testDevice && SceneManager::GetInstance().IsDeviceLost()) {
         auto lose = [](auto& map) {
@@ -1069,6 +1091,7 @@ void GpuWork::Flush() {
         lose(materials_);
         lose(instances_);
         lose(textures_);
+        lose(saves_);
         return;
     }
     auto* device = EngineDevice();
@@ -1101,6 +1124,170 @@ void GpuWork::Flush() {
         Run(*instance, device, ctx, inputs);
         instance->lastSignature = signature;
     }
+
+    // Saves: copy after this flush's runs (so a save asked for with a
+    // parameter change gets the new result); read back once the GPU is done.
+    for (auto& [handle, save] : saves_) {
+        if (save->status != SKYRIMRENDERER_GPU_PENDING || save->writing) continue;
+        if (save->copied) {
+            CollectSave(save, ctx);
+            continue;
+        }
+        auto& tex = *save->texture;
+        if (tex.destroyed) {
+            save->Fail("the texture was destroyed");
+        } else if (tex.status == SKYRIMRENDERER_GPU_FAILED) {
+            save->Fail("texture: " + tex.error);
+        } else if (tex.status == SKYRIMRENDERER_GPU_READY) {
+            if (!state) {
+                EnsureSamplers(device);
+                state.emplace(ctx);
+            }
+            if (CopyForSave(*save, device, ctx)) save->copied = true;
+        }
+    }
+}
+
+bool GpuWork::CopyForSave(SaveJob& save, ID3D11Device* device, ID3D11DeviceContext* ctx) {
+    auto& tex = *save.texture;
+    if (save.mip >= tex.mips) {
+        save.Fail(std::format("mip {} out of range (the texture has {})", save.mip, tex.mips));
+        return false;
+    }
+    if (!copyShader_) {
+        save.Fail("the copy shader is unavailable");
+        return false;
+    }
+    save.width = std::max(tex.width >> save.mip, 1u);
+    save.height = std::max(tex.height >> save.mip, 1u);
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = save.width;
+    td.Height = save.height;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> rgba;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+    D3D11_TEXTURE2D_DESC sd = td;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, rgba.GetAddressOf())) ||
+        FAILED(device->CreateUnorderedAccessView(rgba.Get(), nullptr, uav.GetAddressOf())) ||
+        FAILED(device->CreateTexture2D(&sd, nullptr, save.staging.GetAddressOf()))) {
+        save.Fail("creating the readback textures failed");
+        return false;
+    }
+    // Any format (BC included) through Load: what a shader sampling it sees,
+    // re-encoded to sRGB when the view decodes it, i.e. as stored.
+    const uint32_t params[4] = { save.mip, tex.srgb ? 1u : 0u, save.width, save.height };
+    ctx->UpdateSubresource(copyParams_.Get(), 0, nullptr, params, 0, 0);
+    ID3D11Buffer* cb = copyParams_.Get();
+    ID3D11ShaderResourceView* srv = tex.srv.Get();
+    ID3D11UnorderedAccessView* u = uav.Get();
+    ctx->CSSetShader(copyShader_.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, &cb);
+    ctx->CSSetShaderResources(0, 1, &srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &u, nullptr);
+    ctx->Dispatch((save.width + 7) / 8, (save.height + 7) / 8, 1);
+    ID3D11UnorderedAccessView* noUAV = nullptr;
+    ID3D11ShaderResourceView* noSRV = nullptr;
+    ctx->CSSetUnorderedAccessViews(0, 1, &noUAV, nullptr);
+    ctx->CSSetShaderResources(0, 1, &noSRV);
+    ctx->CopyResource(save.staging.Get(), rgba.Get());
+    return true;
+}
+
+void GpuWork::CollectSave(const std::shared_ptr<SaveJob>& save, ID3D11DeviceContext* ctx) {
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    const HRESULT hr = ctx->Map(save->staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;  // next flush
+    if (FAILED(hr)) {
+        save->Fail("reading the texture back failed");
+        return;
+    }
+    std::vector<uint8_t> pixels(size_t(save->width) * save->height * 4);
+    for (uint32_t y = 0; y < save->height; ++y) {
+        std::memcpy(pixels.data() + size_t(y) * save->width * 4,
+                    static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch, size_t(save->width) * 4);
+    }
+    ctx->Unmap(save->staging.Get(), 0);
+    save->staging.Reset();
+    save->writing = true;
+    std::thread([this, save, pixels = std::move(pixels)] {
+        const Result r = ExportEncoders::WritePNG(save->path, pixels.data(), save->width, save->height);
+        std::lock_guard lock(mutex_);
+        save->writing = false;
+        if (save->status != SKYRIMRENDERER_GPU_PENDING) return;
+        if (r != Result::Success) {
+            save->Fail("writing " + ExportEncoders::PathToUtf8(save->path) + " failed");
+            return;
+        }
+        save->status = SKYRIMRENDERER_GPU_READY;
+        SKSE::log::info("[GpuWork] saved {}x{} mip {} to {}", save->width, save->height, save->mip,
+                        ExportEncoders::PathToUtf8(save->path));
+    }).detach();
+}
+
+uint32_t GpuWork::Save(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path) {
+    if (!utf8Path || !utf8Path[0]) return 0;
+    {
+        std::lock_guard lock(mutex_);
+        if (!Find(textures_, caller, texture)) return 0;
+    }
+    // The copy shader, compiled on the calling thread (never in a flush).
+    static std::once_flag once;
+    std::call_once(once, [this] {
+        constexpr char kCopy[] = R"(
+cbuffer Copy : register(b0) { uint Mip; uint EncodeSRGB; uint2 Size; };
+Texture2D<float4> Src : register(t0);
+RWTexture2D<unorm float4> Dst : register(u0);
+float3 ToSRGB(float3 c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= Size)) return;
+    float4 c = Src.Load(int3(id.xy, Mip));
+    if (EncodeSRGB != 0) c.rgb = ToSRGB(saturate(c.rgb));
+    Dst[id.xy] = c;
+}
+)";
+        auto* device = EngineDevice();
+        Microsoft::WRL::ComPtr<ID3DBlob> blob, errors;
+        if (!device || FAILED(D3DCompile(kCopy, sizeof(kCopy) - 1, "GpuSaveCopy", nullptr, nullptr, "main", "cs_5_0", 0,
+                                         0, blob.GetAddressOf(), errors.GetAddressOf()))) {
+            SKSE::log::error("[GpuWork] save copy shader failed: {}",
+                             errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no device");
+            return;
+        }
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 16;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> cs;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> cb;
+        if (SUCCEEDED(device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                  cs.GetAddressOf())) &&
+            SUCCEEDED(device->CreateBuffer(&bd, nullptr, cb.GetAddressOf()))) {
+            std::lock_guard lock(mutex_);
+            copyShader_ = cs;
+            copyParams_ = cb;
+        }
+    });
+
+    std::lock_guard lock(mutex_);
+    auto t = Find(textures_, caller, texture);
+    if (!t) return 0;
+    auto save = std::make_shared<SaveJob>();
+    save->owner = caller;
+    save->texture = t;
+    save->mip = mip;
+    save->path = ExportEncoders::PathFromUtf8(utf8Path);
+    const uint32_t handle = NextHandle();
+    saves_[handle] = save;
+    return handle;
 }
 
 }  // namespace SkyrimRenderer

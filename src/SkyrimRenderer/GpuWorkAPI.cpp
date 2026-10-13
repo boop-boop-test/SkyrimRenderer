@@ -111,6 +111,10 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadGpuTexture(const char* dataPath) 
     return GpuWork::Get().Load(SKYRIMRENDERER_CALLER, dataPath);
 }
 
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_SaveGpuTexture(uint32_t texture, uint32_t mip, const char* utf8Path) {
+    return GpuWork::Get().Save(SKYRIMRENDERER_CALLER, texture, mip, utf8Path);
+}
+
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuTexture(uint32_t texture, uint32_t* width, uint32_t* height,
                                                          uint32_t* mipLevels, void** srv, void** engineTexture) {
     return GpuWork::Get().TextureInfo(SKYRIMRENDERER_CALLER, texture, width, height, mipLevels, srv, engineTexture)
