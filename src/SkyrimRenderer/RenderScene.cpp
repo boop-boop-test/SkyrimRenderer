@@ -1794,6 +1794,36 @@ std::vector<std::string> RenderScene::GetPostProcessStack(PostProcessStage stage
 }
 
 // ============================================================================
+// Export targets
+// ============================================================================
+
+void RenderScene::BeginTargetOverride(RenderTargetManager& target, const ProjectionWindow& window) {
+    std::lock_guard lock(mutex_);
+    const bool resized = target.GetWidth() != renderTarget_.GetWidth() ||
+                         target.GetHeight() != renderTarget_.GetHeight();
+    std::swap(renderTarget_, target);
+    camera_.SetProjectionWindow(window);
+    // The post-process ping-pong targets are copied from the render target,
+    // so they follow its size.
+    if (resized && ppCtx_.initialized) {
+        ReleasePingPongTargets();
+        CreatePingPongTargets();
+    }
+}
+
+void RenderScene::EndTargetOverride(RenderTargetManager& target) {
+    std::lock_guard lock(mutex_);
+    const bool resized = target.GetWidth() != renderTarget_.GetWidth() ||
+                         target.GetHeight() != renderTarget_.GetHeight();
+    std::swap(renderTarget_, target);
+    camera_.SetProjectionWindow({});
+    if (resized && ppCtx_.initialized) {
+        ReleasePingPongTargets();
+        CreatePingPongTargets();
+    }
+}
+
+// ============================================================================
 // Resize
 // ============================================================================
 

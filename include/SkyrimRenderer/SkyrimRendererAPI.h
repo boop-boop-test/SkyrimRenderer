@@ -595,4 +595,154 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float expo
 // Any out pointer may be NULL. Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
 
+// ---- Export (API 10) ----
+// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+//
+// Paths are UTF-8. Parent directories are created. Exports render into their
+// own temporary render targets: the scene's size, texture (GetSceneTexture
+// pointers stay valid), camera and actor pose are what they were before, and
+// nothing of an export is ever composited or shown. Pixels are what ExportPNG
+// writes (sRGB-encoded RGBA; set the background alpha to 0 for a transparent
+// background). PNGs here are compressed (WIC), unlike ExportPNG's.
+
+// --- Multi-frame exports: turntables and animation strips ---
+//
+// A job renders framesPerTick frames (default 1) per Tick on the thread that
+// drives the scene's consumer: the Present hook, or the consumer's own
+// SkyrimRenderer_Tick (texture mode). Nothing happens without one of them.
+// The live camera (and clip time) is put back right after each tick's
+// frames, so the live preview keeps rendering as usual; readback is
+// pipelined (no GPU stall) and encoding runs on a worker thread. Every frame
+// uses the camera as it was when the job started; only the yaw (and / or the
+// clip time) is stepped. Destroying the scene (or the stepped actor) fails the
+// job at its next tick.
+//
+// Completion: the calling mod's ExportComplete callback (on the Tick thread,
+// once per job: done, failed or cancelled), and GetExportStatus at any time.
+// Statuses are kept until ReleaseExport (or, past the 64 most recent finished
+// jobs, dropped oldest first). Shutdown drops the caller's jobs.
+
+#define SKYRIMRENDERER_EXPORT_SHEET   0   // one sprite-sheet PNG (grid) + <name>.json with frame rects
+#define SKYRIMRENDERER_EXPORT_FRAMES  1   // numbered PNGs: <name>_000.png, <name>_001.png, ...
+#define SKYRIMRENDERER_EXPORT_APNG    2   // animated PNG (full colour + alpha)
+#define SKYRIMRENDERER_EXPORT_GIF     3   // animated GIF (256 colours per frame, 1-bit alpha)
+
+// Export flags
+#define SKYRIMRENDERER_EXPORT_STEP_YAW      0x1u   // step the camera yaw from startYaw to endYaw
+#define SKYRIMRENDERER_EXPORT_STEP_TIME     0x2u   // step the actor's clip from startTime to endTime
+// Frame i of n sits at start + (end - start) * i / n, so the sequence loops
+// (the last frame is one step short of the end). With INCLUSIVE_END it is
+// i / (n - 1) and the last frame lands on the end. startYaw == endYaw means a
+// full turn (startYaw .. startYaw + 360) and is always looping.
+#define SKYRIMRENDERER_EXPORT_INCLUSIVE_END 0x4u
+
+// Job states (SkyrimRenderer_ExportStatus::state, callback)
+#define SKYRIMRENDERER_EXPORT_STATE_UNKNOWN   0   // no such job (never was, released or dropped)
+#define SKYRIMRENDERER_EXPORT_STATE_RENDERING 1
+#define SKYRIMRENDERER_EXPORT_STATE_WRITING   2   // all frames rendered, file being written
+#define SKYRIMRENDERER_EXPORT_STATE_DONE      3
+#define SKYRIMRENDERER_EXPORT_STATE_FAILED    4   // see result
+#define SKYRIMRENDERER_EXPORT_STATE_CANCELLED 5
+
+struct SkyrimRenderer_ExportFramesDesc {
+    uint32_t    structSize;     // in: sizeof(SkyrimRenderer_ExportFramesDesc)
+    uint32_t    scene;
+    uint32_t    actor;          // STEP_TIME: actor preview whose loaded clip is stepped (SeekAnimation)
+    uint32_t    format;         // SKYRIMRENDERER_EXPORT_SHEET / FRAMES / APNG / GIF
+    uint32_t    flags;          // SKYRIMRENDERER_EXPORT_STEP_YAW and / or STEP_TIME, INCLUSIVE_END
+    uint32_t    frameCount;     // 1..1024
+    float       startYaw;       // degrees, as SetCamera
+    float       endYaw;
+    float       startTime;      // seconds into the clip
+    float       endTime;        // <= startTime: the clip's end
+    uint32_t    width;          // frame size; 0 = the scene's (1..4096)
+    uint32_t    height;
+    uint32_t    frameDelayMs;   // APNG / GIF; 0 = clip time per frame (STEP_TIME) or 50 ms (GIF: 10 ms units, >= 20)
+    uint32_t    loopCount;      // APNG / GIF; 0 = forever
+    uint32_t    columns;        // sheet; 0 = ceil(sqrt(frameCount)). Sheet <= 32768 px a side, 2^28 px
+    uint32_t    framesPerTick;  // 0 = 1; at most 7
+    const char* outPath;        // UTF-8: sheet / APNG / GIF file, or the FRAMES name pattern base
+};
+
+// Called on the Tick thread when a job ends. outPath is the job's path (UTF-8),
+// valid for the call only. result is a Result code (0 when state is DONE).
+typedef void (*SkyrimRenderer_ExportCallback)(
+    uint32_t job, uint32_t scene, uint32_t state, uint32_t result, const char* outPath);
+
+struct SkyrimRenderer_ExportStatus {
+    uint32_t structSize;        // in: sizeof(SkyrimRenderer_ExportStatus)
+    uint32_t state;             // SKYRIMRENDERER_EXPORT_STATE_*
+    uint32_t result;            // Result code once finished (0 = success)
+    uint32_t scene;
+    uint32_t framesRendered;    // rendered and read back
+    uint32_t framesWritten;     // encoded by the writer thread
+    uint32_t frameCount;
+};
+
+// Start a multi-frame export. Returns a job id, 0 when refused (bad scene,
+// parameters, no clip for STEP_TIME, sizes over the caps; see the log).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportFrames(const SkyrimRenderer_ExportFramesDesc* desc);
+
+// Turntable: frameCount frames with the camera yaw stepped from startYaw to
+// endYaw (equal: one full 360 turn), at the scene's size. flags:
+// SKYRIMRENDERER_EXPORT_INCLUSIVE_END or 0. Returns a job id, 0 when refused.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportTurntable(
+    uint32_t scene, uint32_t frameCount, float startYaw, float endYaw,
+    uint32_t format, const char* outPath, uint32_t flags);
+
+// Animation strip: frameCount frames of `actor`'s loaded clip from startTime
+// to endTime (endTime <= startTime: to the clip's end), camera fixed, at the
+// scene's size. The actor is left at the clip time it had (playing clips keep
+// playing). flags: SKYRIMRENDERER_EXPORT_INCLUSIVE_END or 0, plus
+// SKYRIMRENDERER_EXPORT_STEP_YAW for a full turn while it plays. Returns a job
+// id, 0 when refused.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportAnimationFrames(
+    uint32_t scene, uint32_t actor, uint32_t frameCount, float startTime, float endTime,
+    uint32_t format, const char* outPath, uint32_t flags);
+
+// Fill out (out->structSize must be set). Returns 1, or 0 for an unknown job
+// (state UNKNOWN) or a too-small struct.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetExportStatus(uint32_t job, SkyrimRenderer_ExportStatus* out);
+
+// Stop a running job (state CANCELLED; the callback still runs). Partial
+// files may be left behind.
+SKYRIMRENDERER_API void SkyrimRenderer_CancelExport(uint32_t job);
+
+// Forget a job's status; a running job is cancelled without a callback.
+SKYRIMRENDERER_API void SkyrimRenderer_ReleaseExport(uint32_t job);
+
+// Set/clear the calling mod's export-complete callback (NULL clears).
+SKYRIMRENDERER_API void SkyrimRenderer_SetExportCompleteCallback(SkyrimRenderer_ExportCallback callback);
+
+// --- High-res stills ---
+
+// Render the scene once at `scale` x its size and write a compressed PNG.
+// Up to 4096 px a side renders in one temporary target; beyond that in 4096
+// px tiles, each an off-centre slice of the full frame's projection, stitched
+// on the CPU (screen-space post-process passes then run per tile). Output is
+// capped at 32768 px a side and 2^28 pixels: scale is lowered to fit.
+// Synchronous, render thread only (like RenderToTexture); large scales take
+// a while. Returns a Result.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportPNGScaled(uint32_t scene, const char* filePath, float scale);
+
+// --- Item icons ---
+
+#define SKYRIMRENDERER_ITEM_FEMALE          0x1u   // armor: the female model (falls back to male)
+#define SKYRIMRENDERER_ITEM_GROUND_MODEL    0x2u   // armor: the ARMO ground / inventory model, not the worn ARMA
+#define SKYRIMRENDERER_ITEM_APPEND          0x4u   // keep the scene's meshes (default: replace them)
+#define SKYRIMRENDERER_ITEM_KEEP_CAMERA     0x8u   // do not frame
+#define SKYRIMRENDERER_ITEM_KEEP_BACKGROUND 0x10u  // keep the background (default: transparent black)
+
+// Load one item's model alone into a scene (no actor, no body) for icons and
+// catalogue thumbnails, and frame it: a 3/4 view from above with the bounds
+// fitted to the frame (10% margin). formID: an armor (its worn ARMA model for
+// the player's race, else the armor's race; GROUND_MODEL for the ARMO world
+// model; each falls back to the other), an ARMA, a weapon, ammo, misc item,
+// or any other form with a model; a reference uses its base object.
+// Replaces the scene's meshes (use a scene without actor previews), and sets
+// the background to (0, 0, 0, 0) and the FOV to 50 (narrower for very small
+// items) unless the flags say otherwise. Texture swaps (alternate textures)
+// are not applied. Returns the number of shapes loaded, 0 on failure.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint32_t formID, uint32_t flags);
+
 } // extern "C"

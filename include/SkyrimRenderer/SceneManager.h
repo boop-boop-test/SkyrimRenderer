@@ -98,6 +98,13 @@ public:
     /// failure (every valid scene still renders), Success otherwise.
     Result RenderToTextures(const SceneHandle* scenes, uint32_t count);
 
+    /// Render a scene into another render target (exports): the same camera,
+    /// lights and meshes as its own render, but the scene's own target and
+    /// texture are untouched. `window` renders one tile of the full frame.
+    /// Render thread only (game main thread / Present hook), like RenderToTexture.
+    Result RenderSceneInto(SceneHandle scene, RenderTargetManager& target,
+                           const ProjectionWindow& window = {});
+
     /// Timings of a scene's last render; false for an unknown scene.
     bool GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out);
 

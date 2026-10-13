@@ -774,6 +774,17 @@ Result SceneManager::RenderToTextures(const SceneHandle* scenes, uint32_t count)
     return Failed(result) ? result : missing;
 }
 
+Result SceneManager::RenderSceneInto(SceneHandle scene, RenderTargetManager& target,
+                                     const ProjectionWindow& window) {
+    auto* s = GetScene(scene);
+    if (!s) return Result::InvalidHandle;
+    if (!target.IsValid()) return Result::InvalidParameter;
+    s->BeginTargetOverride(target, window);
+    const Result result = GuardedRender(s, "RenderSceneInto");
+    s->EndTargetOverride(target);
+    return result;
+}
+
 bool SceneManager::GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out) {
     auto* s = GetScene(scene);
     if (!s) return false;

@@ -455,7 +455,20 @@ DirectX::XMMATRIX CameraController::GetView() const {
 DirectX::XMMATRIX CameraController::GetProjection(float aspectRatio) const {
     using namespace DirectX;
     float fovRad = fov_ * XM_PI / 180.0f;
-    return XMMatrixPerspectiveFovRH(fovRad, aspectRatio, 0.1f, 10000.0f);
+    if (window_.IsFull()) return XMMatrixPerspectiveFovRH(fovRad, aspectRatio, 0.1f, 10000.0f);
+
+    // A tile of the full frame: the full frame's projection, then the tile's
+    // NDC rectangle stretched to fill the target (row vectors: P * crop).
+    const float aspect = window_.aspect > 0.0f ? window_.aspect : aspectRatio;
+    const float sx = 2.0f / std::max(window_.x1 - window_.x0, 1e-6f);
+    const float sy = 2.0f / std::max(window_.y1 - window_.y0, 1e-6f);
+    const float cx = (window_.x0 + window_.x1) * 0.5f;
+    const float cy = (window_.y0 + window_.y1) * 0.5f;
+    const XMMATRIX crop(sx, 0.0f, 0.0f, 0.0f,
+                        0.0f, sy, 0.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f, 0.0f,
+                        -sx * cx, -sy * cy, 0.0f, 1.0f);
+    return XMMatrixPerspectiveFovRH(fovRad, aspect, 0.1f, 10000.0f) * crop;
 }
 
 DirectX::XMMATRIX CameraController::GetViewProjection(float aspectRatio) const {

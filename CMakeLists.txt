@@ -71,6 +71,9 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/CommunityShaders.h
     include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
+    include/SkyrimRenderer/ExportEncoders.h
+    include/SkyrimRenderer/TurntableExporter.h
+    include/SkyrimRenderer/ItemPreview.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -102,6 +105,9 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SplineDecompressor.cpp
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
+    src/SkyrimRenderer/ExportEncoders.cpp
+    src/SkyrimRenderer/TurntableExporter.cpp
+    src/SkyrimRenderer/ItemPreview.cpp
     src/SkyrimRenderer/WorkerPool.cpp
 )
 

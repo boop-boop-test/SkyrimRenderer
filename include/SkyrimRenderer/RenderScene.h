@@ -165,6 +165,16 @@ public:
     Result ExportPNG(const char* filePath);
     Result ExportDDS(const char* filePath);
 
+    // ── Export targets ──────────────────────────────────────────────────────
+
+    /// Exports: swap `target` in for the scene's own render target, and render
+    /// only `window` of the frame, until EndTargetOverride swaps them back. The
+    /// scene's own target, texture and size stay untouched (consumers' SRVs
+    /// stay valid). Render thread only; nothing else may render this scene
+    /// in between.
+    void BeginTargetOverride(RenderTargetManager& target, const ProjectionWindow& window);
+    void EndTargetOverride(RenderTargetManager& target);
+
     // ── Resize ──────────────────────────────────────────────────────────────
 
     Result Resize(uint32_t width, uint32_t height);
