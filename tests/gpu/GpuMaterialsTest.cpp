@@ -308,6 +308,42 @@ int main(int argc, char** argv) {
     CHECK(ch(t, 0) == 16 && ch(t, 1) == 16 && ch(t, 2) == 255, "got %u %u %u", ch(t, 0), ch(t, 1), ch(t, 2));
     CHECK(SetGpuInstanceOutput(s, 0, &od) == 0, "");  // too late: it exists
 
+    std::printf("readback into memory\n");
+    {
+        API(ReadGpuTextureAsync);
+        API(PollGpuTextureRead);
+        const uint32_t read = ReadGpuTextureAsync(sOut, 0);
+        CHECK(read != 0 && GetGpuStatus(read) == SKYRIMRENDERER_GPU_PENDING, "");
+        uint32_t rw = 0, rh = 0;
+        int32_t r = SKYRIMRENDERER_GPU_READ_PENDING;
+        uint8_t tiny[4];
+        for (int k = 0; k < 200 && r == SKYRIMRENDERER_GPU_READ_PENDING; ++k) {
+            FlushGpuWork();
+            Sleep(1);
+            r = PollGpuTextureRead(read, tiny, sizeof(tiny), &rw, &rh);
+        }
+        CHECK(r == SKYRIMRENDERER_GPU_READ_BUFFER_TOO_SMALL && rw == 16 && rh == 16, "r %d %ux%u", r, rw, rh);
+        std::vector<uint8_t> px(rw * rh * 4);
+        CHECK(PollGpuTextureRead(read, px.data(), uint32_t(px.size()), &rw, &rh) == SKYRIMRENDERER_GPU_READ_DONE, "");
+        CHECK(px[0] == 16 && px[1] == 16 && px[2] == 255, "got %u %u %u", px[0], px[1], px[2]);
+        const uint32_t readIn = ReadGpuTextureAsync(input, 0);  // a wrapped input, 64x32
+        r = SKYRIMRENDERER_GPU_READ_PENDING;
+        std::vector<uint8_t> in(64 * 32 * 4);
+        for (int k = 0; k < 200 && r == SKYRIMRENDERER_GPU_READ_PENDING; ++k) {
+            FlushGpuWork();
+            Sleep(1);
+            r = PollGpuTextureRead(readIn, in.data(), uint32_t(in.size()), &rw, &rh);
+        }
+        const size_t at = (3 * 64 + 10) * 4;  // (10, 3): 40 24 100 200
+        CHECK(r == SKYRIMRENDERER_GPU_READ_DONE && in[at] == 40 && in[at + 1] == 24 && in[at + 2] == 100 &&
+                  in[at + 3] == 200,
+              "r %d got %u %u %u %u", r, in[at], in[at + 1], in[at + 2], in[at + 3]);
+        CHECK(PollGpuTextureRead(sOut, px.data(), uint32_t(px.size()), &rw, &rh) == SKYRIMRENDERER_GPU_READ_FAILED, "");
+        DestroyGpuObject(read);
+        DestroyGpuObject(readIn);
+        CHECK(GetGpuStatus(read) == SKYRIMRENDERER_GPU_INVALID, "");
+    }
+
     std::printf("PER_LEVEL mips\n");
     SkyrimRenderer_GpuMaterialDesc pd{ sizeof(pd) };
     pd.source = kPerLevel;

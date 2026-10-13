@@ -12,7 +12,9 @@
 //   --shader FILE.hlsl    the material (compiled with FILE's folder for #include)
 //   --entry NAME          entry point (default main)
 //   --mips generate|perlevel|none
-//   --input [NAME=]FILE   bind a texture (NAME defaults to Source)
+//   --input [NAME=]FILE   bind a texture (NAME defaults to Source). FILE can be
+//                         ARCHIVE.bsa::textures\path\inside.dds (SE archives)
+//   --bsa-list ARCHIVE.bsa [FILTER]   list an archive's files (substring filter)
 //   --param NAME=V[,V..]  float values      --iparam NAME=V[,V..]  int values
 //   --format like|rgba8|srgb|rgba16f|r8    output 0 format (before the first --out)
 //   --size WxH            output 0 size (before the first --out)
@@ -26,6 +28,7 @@
 //     --param PupilScale=0.5 --out p050.png --param PupilScale=1 --out p100.png
 #define SKYRIMRENDERER_STATIC
 #include "SkyrimRenderer/SkyrimRendererAPI.h"
+#include "BsaReader.h"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -173,9 +176,31 @@ int main(int argc, char** argv) {
             mips = v == "perlevel" ? SKYRIMRENDERER_GPU_MIPS_PER_LEVEL
                  : v == "none"     ? SKYRIMRENDERER_GPU_MIPS_NONE
                                    : SKYRIMRENDERER_GPU_MIPS_GENERATE;
+        } else if (a == "--bsa-list") {
+            BsaReader::Archive archive;
+            if (!BsaReader::Open(archive, next())) Die(archive.error);
+            const std::string filter =
+                i + 1 < args.size() && args[i + 1].rfind("--", 0) != 0 ? BsaReader::Normalize(args[++i]) : "";
+            for (const auto& e : archive.entries) {
+                if (filter.empty() || e.path.find(filter) != std::string::npos) std::printf("%s\n", e.path.c_str());
+            }
         } else if (a == "--input") {
             ensureMaterial();
-            const auto [name, file] = SplitEq(next(), "Source");
+            auto [name, file] = SplitEq(next(), "Source");
+            if (const auto sep = file.find("::"); sep != std::string::npos) {
+                // Out of an archive: extracted to a temp file, loaded from there.
+                BsaReader::Archive archive;
+                std::vector<uint8_t> bytes;
+                if (!BsaReader::Open(archive, file.substr(0, sep)) || !BsaReader::Extract(archive, file.substr(sep + 2), bytes)) {
+                    Die(archive.error);
+                }
+                const auto inner = std::filesystem::path(BsaReader::Normalize(file.substr(sep + 2)));
+                const auto temp = std::filesystem::temp_directory_path() /
+                                  ("GpuMaterialRun_" + std::to_string(GetCurrentProcessId()) + "_" + inner.filename().string());
+                std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                std::printf("extracted %s (%zu bytes)\n", file.c_str(), bytes.size());
+                file = temp.string();
+            }
             const uint32_t tex = LoadGpuTexture(file.c_str());
             if (Settle(tex) != SKYRIMRENDERER_GPU_READY) Die("input " + file + ": " + ErrorOf(tex));
             uint32_t w = 0, h = 0, m = 0;

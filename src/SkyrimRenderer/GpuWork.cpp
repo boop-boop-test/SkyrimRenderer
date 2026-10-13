@@ -1127,6 +1127,7 @@ void GpuWork::Flush() {
 
     // Saves: copy after this flush's runs (so a save asked for with a
     // parameter change gets the new result); read back once the GPU is done.
+    bool copiedAny = false;
     for (auto& [handle, save] : saves_) {
         if (save->status != SKYRIMRENDERER_GPU_PENDING || save->writing) continue;
         if (save->copied) {
@@ -1143,9 +1144,15 @@ void GpuWork::Flush() {
                 EnsureSamplers(device);
                 state.emplace(ctx);
             }
-            if (CopyForSave(*save, device, ctx)) save->copied = true;
+            if (CopyForSave(*save, device, ctx)) {
+                save->copied = true;
+                copiedAny = true;
+            }
         }
     }
+    // Submit the copies now: a DO_NOT_WAIT map never completes on commands the
+    // runtime is still holding (rare: only on a flush that queued a readback).
+    if (copiedAny) ctx->Flush();
 }
 
 bool GpuWork::CopyForSave(SaveJob& save, ID3D11Device* device, ID3D11DeviceContext* ctx) {
@@ -1216,6 +1223,11 @@ void GpuWork::CollectSave(const std::shared_ptr<SaveJob>& save, ID3D11DeviceCont
     }
     ctx->Unmap(save->staging.Get(), 0);
     save->staging.Reset();
+    if (save->toMemory) {
+        save->pixels = std::move(pixels);
+        save->status = SKYRIMRENDERER_GPU_READY;
+        return;
+    }
     save->writing = true;
     std::thread([this, save, pixels = std::move(pixels)] {
         const Result r = ExportEncoders::WritePNG(save->path, pixels.data(), save->width, save->height);
@@ -1234,6 +1246,30 @@ void GpuWork::CollectSave(const std::shared_ptr<SaveJob>& save, ID3D11DeviceCont
 
 uint32_t GpuWork::Save(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path) {
     if (!utf8Path || !utf8Path[0]) return 0;
+    return QueueReadback(caller, texture, mip, utf8Path);
+}
+
+uint32_t GpuWork::Read(ConsumerId caller, uint32_t texture, uint32_t mip) {
+    return QueueReadback(caller, texture, mip, nullptr);
+}
+
+int32_t GpuWork::PollRead(ConsumerId caller, uint32_t read, uint8_t* rgba, uint32_t bufSize, uint32_t* width,
+                          uint32_t* height) {
+    std::lock_guard lock(mutex_);
+    auto r = Find(saves_, caller, read);
+    if (width) *width = 0;
+    if (height) *height = 0;
+    if (!r || !r->toMemory) return SKYRIMRENDERER_GPU_READ_FAILED;
+    if (r->status == SKYRIMRENDERER_GPU_PENDING) return SKYRIMRENDERER_GPU_READ_PENDING;
+    if (r->status != SKYRIMRENDERER_GPU_READY) return SKYRIMRENDERER_GPU_READ_FAILED;
+    if (width) *width = r->width;
+    if (height) *height = r->height;
+    if (!rgba || bufSize < r->pixels.size()) return SKYRIMRENDERER_GPU_READ_BUFFER_TOO_SMALL;
+    std::memcpy(rgba, r->pixels.data(), r->pixels.size());
+    return SKYRIMRENDERER_GPU_READ_DONE;
+}
+
+uint32_t GpuWork::QueueReadback(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path) {
     {
         std::lock_guard lock(mutex_);
         if (!Find(textures_, caller, texture)) return 0;
@@ -1284,7 +1320,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     save->owner = caller;
     save->texture = t;
     save->mip = mip;
-    save->path = ExportEncoders::PathFromUtf8(utf8Path);
+    save->toMemory = utf8Path == nullptr;
+    if (utf8Path) save->path = ExportEncoders::PathFromUtf8(utf8Path);
     const uint32_t handle = NextHandle();
     saves_[handle] = save;
     return handle;

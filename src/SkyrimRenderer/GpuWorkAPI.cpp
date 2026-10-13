@@ -115,6 +115,15 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_SaveGpuTexture(uint32_t texture, uint
     return GpuWork::Get().Save(SKYRIMRENDERER_CALLER, texture, mip, utf8Path);
 }
 
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadGpuTextureAsync(uint32_t texture, uint32_t mip) {
+    return GpuWork::Get().Read(SKYRIMRENDERER_CALLER, texture, mip);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint8_t* rgba, uint32_t bufSize,
+                                                              uint32_t* width, uint32_t* height) {
+    return GpuWork::Get().PollRead(SKYRIMRENDERER_CALLER, read, rgba, bufSize, width, height);
+}
+
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuTexture(uint32_t texture, uint32_t* width, uint32_t* height,
                                                          uint32_t* mipLevels, void** srv, void** engineTexture) {
     return GpuWork::Get().TextureInfo(SKYRIMRENDERER_CALLER, texture, width, height, mipLevels, srv, engineTexture)

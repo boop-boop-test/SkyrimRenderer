@@ -51,6 +51,10 @@ public:
     bool TextureInfo(ConsumerId caller, uint32_t texture, uint32_t* width, uint32_t* height, uint32_t* mips,
                      void** srv, void** engineTexture);
     uint32_t Save(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path);
+    /// Same readback into memory: utf8Path NULL.
+    uint32_t Read(ConsumerId caller, uint32_t texture, uint32_t mip);
+    int32_t PollRead(ConsumerId caller, uint32_t read, uint8_t* rgba, uint32_t bufSize, uint32_t* width,
+                     uint32_t* height);
 
     /// Runs every due instance. Game main thread, inside the frame.
     void Flush();
@@ -111,8 +115,10 @@ private:
         uint64_t version = 0;           // bumped whenever its contents change
     };
 
-    /// One-shot readback of a texture mip to a PNG file.
+    /// One-shot readback of a texture mip, to a PNG file or into memory.
     struct SaveJob : Object {
+        bool toMemory = false;
+        std::vector<uint8_t> pixels;  // toMemory: RGBA8, kept until destroyed
         std::shared_ptr<Texture> texture;
         uint32_t mip = 0;
         std::filesystem::path path;
@@ -164,6 +170,7 @@ private:
     bool MakeEngineTexture(Texture& texture, uint32_t handle);
     bool CopyForSave(SaveJob& save, ID3D11Device* device, ID3D11DeviceContext* ctx);
     void CollectSave(const std::shared_ptr<SaveJob>& save, ID3D11DeviceContext* ctx);
+    uint32_t QueueReadback(ConsumerId caller, uint32_t texture, uint32_t mip, const char* utf8Path);
     void ReleaseLocked(uint32_t handle);
     void EnsureSamplers(ID3D11Device* device);
 

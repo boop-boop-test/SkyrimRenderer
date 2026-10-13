@@ -1375,6 +1375,24 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetGpuTexture(uint32_t texture, uint32
 // does too).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_SaveGpuTexture(uint32_t texture, uint32_t mip, const char* utf8Path);
 
+// The same one-shot readback into memory (calibration: e.g. a radial profile
+// of an eye texture), never per frame. Returns a read handle (0 for a bad
+// texture): PENDING until the pixels are back, READY, or FAILED with
+// GetGpuError. Pick a small mip: 64x64 is plenty for a profile.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ReadGpuTextureAsync(uint32_t texture, uint32_t mip);
+enum {
+    SKYRIMRENDERER_GPU_READ_PENDING = 0,
+    SKYRIMRENDERER_GPU_READ_DONE = 1,              // copied into rgba
+    SKYRIMRENDERER_GPU_READ_FAILED = 2,            // failed, or not a read handle of this mod
+    SKYRIMRENDERER_GPU_READ_BUFFER_TOO_SMALL = 3,  // width / height are set: needs width * height * 4
+};
+// Any thread. Copies the pixels (tightly packed RGBA8 rows, top row first,
+// colour space as stored, BC decoded) once they are back; width and height
+// (optional) are set when the read is done. The pixels stay with the handle
+// until DestroyGpuObject, so it can be polled again.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint8_t* rgba, uint32_t bufSize,
+                                                              uint32_t* width, uint32_t* height);
+
 // Engine textures (outputs with engineTexture = 1). EXPERIMENTAL until
 // verified in game (NTJH issue 165, gate 1): engineTexture stays NULL and the
 // output FAILED with the reason when the engine does not hand out a private
