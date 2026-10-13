@@ -379,8 +379,11 @@ SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void);
 //
 // Output contract (texture mode): DXGI_FORMAT_R8G8B8A8_TYPELESS texture on the
 // engine device, UNORM SRV, one mip level, sRGB-encoded colour, premultiplied
-// alpha (the clear is premultiplied, opaque writes carry alpha 1; alpha-tested
-// cutout pixels keep their straight alpha). Keep the scene within about 2x the
+// alpha (the clear is premultiplied). Opaque and alpha-tested (cutout) materials
+// write coverage, not their texture alpha: as in the game, the alpha test only
+// decides which pixels survive, and every surviving pixel carries alpha 1. Only
+// alpha-blended materials write fractional alpha. This holds on the native and
+// the Community Shaders path alike. Keep the scene within about 2x the
 // CSS box it is shown in: it is sampled bilinearly with no mips.
 
 // Texture mode on/off for a scene. On: premultiplied output, RequestRender

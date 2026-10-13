@@ -625,14 +625,11 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
     ctx->PSSetShader(shader->ps.Get(), nullptr, 0);
 
     // CS writes diffuse alpha even for opaque materials (the game's opaque
-    // blend discards it). Our target is consumed with its alpha (texture mode
-    // promises opaque writes carry alpha 1). A blend factor can't replace the
-    // source alpha (BLEND_FACTOR only scales it: As * 1 = As, which left
-    // see-through holes where alpha-tested hair / beards cover the face), so
-    // keep the larger of source and destination alpha: an opaque surface never
-    // lowers coverage, and over an opaque background or face it stays 1. Over
-    // a transparent background an alpha-tested pixel still gets its diffuse
-    // alpha; only the native shader can force exactly 1 (solidCoverage).
+    // blend discards it). Our target is consumed with its alpha, and texture
+    // mode promises every surviving opaque or cutout pixel carries alpha 1, as
+    // the native shader writes (solidCoverage). No blend state can replace the
+    // source alpha with a constant, so the draw keeps max(As, Ad) (never lowers
+    // coverage) and DrawCoverage then writes alpha 1 exactly where it survived.
     Microsoft::WRL::ComPtr<ID3D11BlendState> savedBlend;
     FLOAT savedFactor[4]{};
     UINT savedMask = 0;
@@ -661,6 +658,7 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
     ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
     ctx->IASetIndexBuffer(mesh.indexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
     ctx->DrawIndexed(mesh.indexCount, 0, 0);
+    if (opaqueAlpha) DrawCoverage(ctx, mesh.indexCount);
 
     if (opaqueAlpha) ctx->OMSetBlendState(savedBlend.Get(), savedFactor, savedMask);
 
@@ -669,6 +667,59 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
         if (s) s->Release();
     }
     return true;
+}
+
+bool CSRenderPath::CoverageResources() {
+    if (coveragePS_ && coverageBlend_) return true;
+    if (coverageFailed_) return false;
+    coverageFailed_ = true;  // until both are made
+
+    // No inputs: links with any bridge VS output.
+    constexpr char kSource[] = "float4 main() : SV_Target { return float4(0, 0, 0, 1); }";
+    Microsoft::WRL::ComPtr<ID3DBlob> blob, errors;
+    if (FAILED(D3DCompile(kSource, sizeof(kSource) - 1, "CSCoverage", nullptr, nullptr, "main", "ps_5_0", 0, 0,
+                          blob.GetAddressOf(), errors.GetAddressOf())) ||
+        FAILED(device_->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                          coveragePS_.ReleaseAndGetAddressOf()))) {
+        SKSE::log::error("[CSRenderPath] coverage PS failed: {}",
+                         errors ? static_cast<const char*>(errors->GetBufferPointer()) : "CreatePixelShader");
+        return false;
+    }
+    D3D11_BLEND_DESC desc{};
+    desc.RenderTarget[0].BlendEnable = FALSE;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+    if (FAILED(device_->CreateBlendState(&desc, coverageBlend_.ReleaseAndGetAddressOf()))) {
+        SKSE::log::error("[CSRenderPath] coverage blend state failed");
+        return false;
+    }
+    coverageFailed_ = false;
+    return true;
+}
+
+// Redraws the mesh just drawn with the same VS, raster and stencil state but
+// depth EQUAL and no depth write, writing only alpha = 1. The CS draw wrote
+// depth exactly where it survived its alpha test and depth test (a discarded
+// or occluded pixel holds another surface's depth), so this marks those
+// pixels and no others.
+void CSRenderPath::DrawCoverage(ID3D11DeviceContext* ctx, UINT indexCount) {
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> savedDS;
+    UINT stencilRef = 0;
+    ctx->OMGetDepthStencilState(savedDS.GetAddressOf(), &stencilRef);
+    CD3D11_DEPTH_STENCIL_DESC dsDesc{ CD3D11_DEFAULT{} };
+    if (savedDS) savedDS->GetDesc(&dsDesc);
+    // Without a depth test every rasterized pixel would pass: leave max(As, Ad).
+    if (!dsDesc.DepthEnable || !CoverageResources()) return;
+    dsDesc.DepthFunc = D3D11_COMPARISON_EQUAL;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equalDS;  // the runtime reuses identical states
+    if (FAILED(device_->CreateDepthStencilState(&dsDesc, equalDS.GetAddressOf()))) return;
+
+    const FLOAT zero[4]{};
+    ctx->OMSetBlendState(coverageBlend_.Get(), zero, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(equalDS.Get(), stencilRef);
+    ctx->PSSetShader(coveragePS_.Get(), nullptr, 0);
+    ctx->DrawIndexed(indexCount, 0, 0);
+    ctx->OMSetDepthStencilState(savedDS.Get(), stencilRef);
 }
 
 } // namespace SkyrimRenderer

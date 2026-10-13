@@ -1319,9 +1319,10 @@ bool ActorPreview::SetBoneRotation(const char* boneName, const float* rot9) {
         for (int i = 0; i < 9; ++i) {
             if (!std::isfinite(rot9[i])) return false;
         }
-        EnsureNifSkeleton();
-        if (nifSkeleton_.FindBone(bone) < 0 && !gpuPose_.contains(bone)) return false;
     }
+    // Setting and clearing alike: a bone the skeleton does not have is 0.
+    EnsureNifSkeleton();
+    if (nifSkeleton_.FindBone(bone) < 0 && !gpuPose_.contains(bone)) return false;
     std::erase_if(boneOverrides_, [&](const BoneOverride& o) { return o.bone == bone; });
     if (rot9) {
         BoneOverride o{bone, {}};

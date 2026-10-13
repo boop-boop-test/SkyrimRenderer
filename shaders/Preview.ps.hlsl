@@ -232,7 +232,8 @@ float4 PSMain(PSInput input) : SV_TARGET {
     // into whatever these surfaces cover: a 1-bit beard (test at 52/255) left
     // its texel alpha (0.2..1) over the opaque face, and those pixels showed
     // the page behind the portrait (a white fringe along the strands).
-    // Blended draws keep their alpha for the over-blend.
+    // Blended draws keep their alpha for the over-blend. This is the texture-mode
+    // contract (SkyrimRendererAPI.h); CSRenderPath::DrawCoverage matches it.
     if (materialFlags.w != 0) {
         alpha = 1.0;
     }
