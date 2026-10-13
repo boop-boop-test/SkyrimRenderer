@@ -154,7 +154,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
                      hasSpecFlag,
                      useSoftLighting, useRimLighting, useBackLighting,
                      hasSKTex, hasBacklight,
-                     isHair, hairVC,
+                     isHair, (shaderFlags & FLAG_ANISO_LIGHTING) != 0, hairVC,
                      diffuseLight, specularLight);
     SceneLook_ApplyOcclusion(directionalAmbient, diffuseLight, specularLight);
 

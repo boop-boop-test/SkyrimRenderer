@@ -329,6 +329,7 @@ std::optional<uint32_t> CSRenderPath::DescriptorFor(const LoadedMesh& mesh) cons
     if (HasFlag(mesh.shaderFlags, ShaderFlags::SoftLighting)) flags |= F::SoftLighting;
     if (HasFlag(mesh.shaderFlags, ShaderFlags::RimLighting)) flags |= F::RimLighting;
     if (HasFlag(mesh.shaderFlags, ShaderFlags::BackLighting)) flags |= F::BackLighting;
+    if (HasFlag(mesh.shaderFlags, ShaderFlags::AnisoLighting)) flags |= F::AnisoLighting;  // as the game builds it
     // NiAlphaProperty test bit, with or without blending: hair strands are
     // blend + test, and without the test their clear texels draw as dark cards.
     // (The loader only sets a cutoff when the test bit is on.)

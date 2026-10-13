@@ -30,6 +30,7 @@
 #define FLAG_DECAL          (1 << 7)
 #define FLAG_DYNAMIC_DECAL  (1 << 8)
 #define FLAG_OWN_EMIT       (1 << 9)
+#define FLAG_ANISO_LIGHTING (1 << 10)
 
 // Texture presence bits (materialFlags.z)
 #define TEX_DIFFUSE    (1 << 0)
