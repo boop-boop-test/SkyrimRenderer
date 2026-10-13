@@ -178,6 +178,34 @@ PBR data lives in the NIF (after PBR NIF patching), so NifReader can read it. Fr
 - `Data/PBRTextureSets` / `Data/PBRMaterialObjects` JSON only apply to world
   texture-set and material-object records, not to NIF-baked PBR on armor.
 
+### How the preview draws PBR (API 10)
+
+Found while chasing "books and torches render purple with CS installed". In a
+CS setup with PBR texture packs (e.g. Vanilla PBR AIO) the meshes are patched
+by PBRNifPatcher / ParallaxGen (`PG Patch output`): `clutter\books\*.nif` and
+`weapons\torch\torch.nif` carry `kMenuScreen` (SLSF2 bit 23), textures under
+`textures\pbr\...` and the PBRNifPatcher JSON values in the vanilla fields
+(e.g. book: glossiness 0.04 = specular level, specular strength 1.0 = roughness
+scale, lighting effect 2 0.15 = displacement scale). Their `_rmaos` maps
+average magenta (roughness high, metallic 0, AO high: book01a_rmaos
+≈ RGB 191,2,235). Before API 10 the native shader read these meshes as vanilla
+Blinn-Phong: glossiness 0.04 clamped to exponent 1 at full strength made a
+"specular" as wide as the diffuse, in the light colours, washing the base
+colour out toward the Studio preset's blue/lavender fill and ambient.
+
+Separately, every torch (vanilla too) has a `HeatRefraction:0` lit shape with
+the Refraction flag whose diffuse slot is a normal map
+(`effects\VaporTileNormal_n.dds`); drawn as a surface it is a large lavender
+swirl over the torch (seen in NTJH's cached torch thumbnail, Skyrim.esm
+0001D4EC). Refraction shapes are now skipped.
+
+Now TruePBR shapes get `ShadingModel::TruePBR`: native path = GGX
+metallic/roughness from RMAOS (`shaders/PBR.hlsl`), emissive from slot 2;
+with the CS path on, `CSRenderPath` draws them with CS's own
+`TRUE_PBR` permutation when it is in CS's shader cache (t0 base, t1 normal,
+t4 displacement, t5 RMAOS, t6 emissive; `PBRFlags`/`PBRParams1` in
+PerMaterial), else natively.
+
 ## Risks
 
 1. **Layout drift between CS versions.** `FeatureData` (b6) is a concatenation of

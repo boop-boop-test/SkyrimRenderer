@@ -16,6 +16,8 @@
 #define SHADING_HAIRTINT    3
 #define SHADING_EYE_ENVMAP  4
 #define SHADING_ENVMAP      5
+#define SHADING_GLOWMAP     6
+#define SHADING_TRUEPBR     7
 
 // ShaderFlags bits (matches C++ ShaderFlags)
 #define FLAG_SPECULAR       (1 << 0)
@@ -27,6 +29,7 @@
 #define FLAG_BACK_LIGHTING  (1 << 6)
 #define FLAG_DECAL          (1 << 7)
 #define FLAG_DYNAMIC_DECAL  (1 << 8)
+#define FLAG_OWN_EMIT       (1 << 9)
 
 // Texture presence bits (materialFlags.z)
 #define TEX_DIFFUSE    (1 << 0)
@@ -38,6 +41,8 @@
 #define TEX_NORMAL     (1 << 6)
 #define TEX_BACKLIGHT  (1 << 7)
 #define TEX_CUBEMAP    (1 << 8)
+#define TEX_GLOW       (1 << 9)   // t1 holds the glow / PBR emissive map (NIF slot 2), not a soft-lighting mask
+#define TEX_RMAOS      (1 << 10)  // t5 holds the TruePBR RMAOS map (NIF slot 5), not an env mask
 
 // ── Per-frame constant buffer (b0) ──────────────────────────────────────────
 // Updated once per frame. Contains camera, lighting, and ambient data.
@@ -63,6 +68,8 @@ cbuffer PerMesh : register(b1) {
     uint4    materialFlags;       // x = shadingModel, y = shaderFlags, z = textureMask
     float4   specularColor;       // xyz = vanilla SpecularColour, w = unused
     float4   lightingEffectParams; // x = softLightingRolloff, y = rimLightPower, z = backlightScale, w = envMapScale
+    float4   emissiveParams;      // rgb = emissive colour x multiple x scene emissive scale (0 = none), w = unused
+    float4   pbrParams;           // x = roughness scale, y = specular level, z = displacement scale, w = unused
 };
 
 // ── Vanilla FaceGen NIF Texture Slots ──────────────────────────────────────

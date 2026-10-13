@@ -98,6 +98,13 @@ public:
     /// failure (every valid scene still renders), Success otherwise.
     Result RenderToTextures(const SceneHandle* scenes, uint32_t count);
 
+    /// Render a scene into another render target (exports): the same camera,
+    /// lights and meshes as its own render, but the scene's own target and
+    /// texture are untouched. `window` renders one tile of the full frame.
+    /// Render thread only (game main thread / Present hook), like RenderToTexture.
+    Result RenderSceneInto(SceneHandle scene, RenderTargetManager& target,
+                           const ProjectionWindow& window = {});
+
     /// Timings of a scene's last render; false for an unknown scene.
     bool GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out);
 
@@ -269,6 +276,11 @@ public:
     /// (API v4). The arrays are uploaded before every render of the scene.
     ActorHandle LoadActorHead(SceneHandle scene, RE::FormID formID);
 
+    /// Load a live actor reference (API 10): LoadActorPreview, then one pose /
+    /// expression snapshot from the live 3D, then the live mirror with
+    /// `mirrorFlags` (SKYRIMRENDERER_MIRROR_*; 0 = keep the snapshot). Main thread.
+    ActorHandle LoadActorFromReference(SceneHandle scene, RE::FormID refFormID, uint32_t mirrorFlags);
+
     /// Get an actor preview by handle.
     ActorPreview* GetActorPreview(ActorHandle handle);
 
@@ -337,6 +349,23 @@ public:
     /// Destroy an actor preview.
     void DestroyActorPreview(ActorHandle handle);
 
+    // ── Held items / picking / highlight (SceneManagerPicking.cpp) ─────────
+
+    Result EquipWeapon(ActorHandle actor, RE::FormID formID, ActorPreview::HeldHand hand, bool drawn);
+    Result UnequipWeapon(ActorHandle actor, RE::FormID formID);
+    void SetWeaponsDrawn(ActorHandle actor, bool drawn);
+
+    /// Synchronous pick (render thread). The hit's owner is mapped to its
+    /// actor handle (Invalid for scene meshes).
+    bool PickAt(SceneHandle scene, uint32_t x, uint32_t y, RenderScene::PickHit& out, ActorHandle& outActor);
+    /// Queue an async pick and a render of the scene (any thread).
+    void RequestPick(SceneHandle scene, uint32_t x, uint32_t y);
+    /// Latest finished async pick, once. False when none is ready.
+    bool GetPickResult(SceneHandle scene, RenderScene::PickHit& out, ActorHandle& outActor);
+
+    bool SetHighlight(ActorHandle actor, uint32_t formID, const Color& color, uint32_t mode, uint32_t width);
+    void ClearHighlight(ActorHandle actor, uint32_t formID);
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// Set `consumer`'s callback that fires every frame from the Present hook,
@@ -362,6 +391,16 @@ private:
     /// Processes all pending render requests. Called from Tick().
     void ProcessPendingRenders();
 
+    /// Step every live mirror (main thread) and queue a render for the shown
+    /// scenes (composited or texture mode) whose preview changed. From Tick().
+    void TickLiveMirrors(float deltaSeconds);
+
+    /// Finish async picks whose texel an earlier render copied. Called from Tick().
+    void CollectPicks();
+
+    /// Actor handle of an ActorPreview (LoadedMesh::owner); Invalid if none.
+    ActorHandle FindActorHandle(const void* preview);
+
     /// Composite ALL scenes with active composite rects into the engine's
     /// framebuffer. Called every frame from HookedPresent.
     void CompositeAllScenes();
@@ -383,7 +422,9 @@ private:
 
     /// GuardedRender for several scenes (see RenderToTextures). Every render
     /// path goes through it, so each records RenderScene::RenderStats.
-    Result GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where);
+    /// perScene (optional) gets each listed scene's own result, in list order.
+    Result GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where,
+                              std::vector<Result>* perScene = nullptr);
 
     std::atomic<uint32_t> renderCallSerial_{0};  // RenderStats::callSerial
 

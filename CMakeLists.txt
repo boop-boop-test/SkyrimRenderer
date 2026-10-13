@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.8.0
+    VERSION 1.9.0
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 
@@ -71,6 +71,20 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/CommunityShaders.h
     include/SkyrimRenderer/CSRenderPath.h
     include/SkyrimRenderer/PostProcessPass.h
+    include/SkyrimRenderer/ExportEncoders.h
+    include/SkyrimRenderer/TurntableExporter.h
+    include/SkyrimRenderer/ItemPreview.h
+    include/SkyrimRenderer/SceneLookTypes.h
+    include/SkyrimRenderer/SceneLook.h
+    include/SkyrimRenderer/ShadowPass.h
+    include/SkyrimRenderer/SSAOPass.h
+    include/SkyrimRenderer/DebugViewPass.h
+    include/SkyrimRenderer/FaceMorphs.h
+    include/SkyrimRenderer/LiveMirror.h
+    include/SkyrimRenderer/PickRenderer.h
+    include/SkyrimRenderer/RigidMeshLoader.h
+    include/SkyrimRenderer/MaterialSetup.h
+    include/SkyrimRenderer/EffectShaderPass.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -102,7 +116,25 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SplineDecompressor.cpp
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
+    src/SkyrimRenderer/ExportEncoders.cpp
+    src/SkyrimRenderer/TurntableExporter.cpp
+    src/SkyrimRenderer/ItemPreview.cpp
+    src/SkyrimRenderer/FaceMorphs.cpp
+    src/SkyrimRenderer/LiveMirror.cpp
+    src/SkyrimRenderer/LiveMirrorAPI.cpp
+    src/SkyrimRenderer/ActorPreviewHeldItems.cpp
+    src/SkyrimRenderer/PickRenderer.cpp
+    src/SkyrimRenderer/RenderScenePicking.cpp
+    src/SkyrimRenderer/RigidMeshLoader.cpp
+    src/SkyrimRenderer/SceneManagerPicking.cpp
     src/SkyrimRenderer/WorkerPool.cpp
+    src/SkyrimRenderer/SceneLook.cpp
+    src/SkyrimRenderer/ShadowPass.cpp
+    src/SkyrimRenderer/SSAOPass.cpp
+    src/SkyrimRenderer/DebugViewPass.cpp
+    src/SkyrimRenderer/MaterialSetup.cpp
+    src/SkyrimRenderer/EffectShaderPass.cpp
+    src/SkyrimRenderer/RenderSceneMaterials.cpp
 )
 
 # Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at

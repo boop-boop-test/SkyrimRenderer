@@ -34,6 +34,8 @@ struct alignas(16) GPU_PerMesh {
     DirectX::XMUINT4  materialFlags;        // shadingModel, shaderFlags, texMask
     DirectX::XMFLOAT4 specularColor;        // xyz = vanilla SpecularColour
     DirectX::XMFLOAT4 lightingEffectParams; // x = softRolloff, y = rimPower, z = backlightScale
+    DirectX::XMFLOAT4 emissiveParams;       // rgb = emissive colour x multiple x scene scale
+    DirectX::XMFLOAT4 pbrParams;            // x = roughness scale, y = specular level, z = displacement scale
 };
 
 /// Matches cbuffer BonePalette : register(b2)
@@ -417,6 +419,8 @@ void ShaderPipeline::UpdatePerMeshConstants(ID3D11DeviceContext* ctx, const PerM
                                             mesh.specularColor[2], 0.0f);
     cb->lightingEffectParams = DirectX::XMFLOAT4(mesh.softLightingRolloff, mesh.rimLightPower,
                                                   mesh.backlightScale, mesh.environmentMapScale);
+    cb->emissiveParams = DirectX::XMFLOAT4(mesh.emissiveColor[0], mesh.emissiveColor[1], mesh.emissiveColor[2], 0.0f);
+    cb->pbrParams = DirectX::XMFLOAT4(mesh.pbrRoughnessScale, mesh.pbrSpecularLevel, mesh.pbrDisplacementScale, 0.0f);
 
     ctx->Unmap(perMeshCB_.Get(), 0);
 }

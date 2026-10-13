@@ -8,6 +8,7 @@
 #include "Common.hlsl"
 #include "Lighting.hlsl"
 #include "ShadingModels.hlsl"
+#include "PBR.hlsl"
 
 // Vanilla ISHDR Reinhard, x * (1 + x * p) / (1 + x) with p = 1 / white^2, applied
 // to luminance and scaled back onto RGB so hues don't shift as they compress.
@@ -142,6 +143,9 @@ float4 PSMain(PSInput input) : SV_TARGET {
     float skyBlend = N.z * 0.5 + 0.5;
     float3 directionalAmbient = lerp(ambientDown.rgb, ambientUp.rgb, skyBlend) * ambIntensity;
 
+    // Scene look (SceneLook.hlsl): key light self-shadow + SSAO. No-ops when off.
+    SceneLook_BeginPixel(input.worldPos, normalize(input.normal), input.pos.xy);
+
     // Accumulate lighting from all 3 lights.
     bool isHair = (shadingModel == SHADING_HAIRTINT);
     bool hasSpecFlag = (shaderFlags & FLAG_SPECULAR) != 0;
@@ -152,6 +156,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
                      hasSKTex, hasBacklight,
                      isHair, hairVC,
                      diffuseLight, specularLight);
+    SceneLook_ApplyOcclusion(directionalAmbient, diffuseLight, specularLight);
 
     // Final assembly — follows vanilla GetOutDiffuse + AddOutSpecular pattern
     float3 totalLight = diffuseLight + directionalAmbient;
@@ -171,6 +176,27 @@ float4 PSMain(PSInput input) : SV_TARGET {
     float3 color = outDiffuse + outSpecular + eyeReflection;
     // Env map: vanilla adds reflection modulated by diffuse lighting (line 1061)
     color += totalLight * envMapReflection;
+
+    // Emissive. emissiveParams.rgb is the NIF emissive colour x multiple x the
+    // scene's emissive scale, already zero when the material doesn't emit
+    // (no SLSF1_OWN_EMIT). Vanilla adds EmitColor (times the glow map for the
+    // Glowmap type) to the diffuse lighting, so it is tinted by the albedo.
+    // The glow / emissive map is bound as an sRGB view, so it samples linear.
+    bool hasGlowTex = (texMask & TEX_GLOW) != 0;
+    float3 glow = hasGlowTex ? skTexture.Sample(diffuseSampler, input.uv).rgb : float3(0, 0, 0);
+    if (shadingModel == SHADING_GLOWMAP) {
+        color += emissiveParams.rgb * glow * albedo;
+    } else if (shadingModel != SHADING_TRUEPBR) {
+        color += emissiveParams.rgb * albedo;
+    }
+
+    // TruePBR replaces the Blinn-Phong result; CS adds its emissive on top,
+    // untinted, only when the material has an emissive map.
+    if (shadingModel == SHADING_TRUEPBR) {
+        bool hasRMAOS = (texMask & TEX_RMAOS) != 0;
+        float4 rmaos = hasRMAOS ? envMaskTexture.Sample(diffuseSampler, input.uv) : float4(1.0, 0.0, 1.0, 1.0);
+        color = ShadeTruePBR(N, V, albedo, rmaos) + emissiveParams.rgb * glow;
+    }
 
     // Tone mapping. Vanilla never hard-clips lit colour: it renders HDR, then the
     // ISHDR pass scales by eye adaptation and applies Reinhard with a white point

@@ -4,6 +4,7 @@
 #include <SKSE/SKSE.h>
 
 #include "SkyrimRenderer/NifMeshLoader.h"
+#include "SkyrimRenderer/MaterialSetup.h"
 #include "SkyrimRenderer/NifReader.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TriFileParser.h"
@@ -851,10 +852,28 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             continue;
         }
         // BSEffectShaderProperty shapes are glows, auras and gradient shells
-        // drawn by the game's unlit effect shader; there is no preview
-        // equivalent, and as a lit material they cover the item in a solid shell.
+        // drawn by the game's unlit effect shader. They load as effect meshes
+        // that only EffectShaderPass draws (unlit, blended, after the lit
+        // passes); as a lit material they would cover the item in a solid shell.
+        // Without a source texture (book "PageText", screen-space effects) or a
+        // blend mode there is nothing a preview can show.
         if (!shader->lighting) {
-            SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (effect shader)", shape.name);
+            const auto* effectAlpha = nif.GetAlpha(shape.alphaProperty);
+            const bool blends = effectAlpha && (effectAlpha->flags & 1u);
+            if (shader->textures.empty() || Nif::GameTexturePath(shader->textures[0]).empty() || !blends) {
+                SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (effect shader without {})", shape.name,
+                                blends ? "a source texture" : "blending");
+                continue;
+            }
+        }
+        // Refraction shapes (torch "HeatRefraction", heat haze, glass distortion)
+        // only bend what is behind them in game; their diffuse slot holds a
+        // normal map (e.g. effects\VaporTileNormal_n.dds), which drawn as a lit
+        // surface is a lavender/purple blob. Nothing for a preview to draw.
+        constexpr uint32_t kRefractionBits = (1u << 2) | (1u << 15) | (1u << 16);  // temp, refraction, fire refraction
+        if (shader->lighting && (shader->flags1 & kRefractionBits)) {
+            SKSE::log::info("[NifMeshLoader] Skipping shape '{}' (refraction, sf1=0x{:08X})", shape.name,
+                            shader->flags1);
             continue;
         }
 
@@ -1384,6 +1403,7 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
             // (matches BSShaderMaterial::Feature enum in CommonLibSSE-NG)
             switch (shaderType) {
                 case 1:  mesh.shadingModel = ShadingModel::EnvironmentMap; break;  // kEnvironmentMap
+                case 2:  mesh.shadingModel = ShadingModel::Glowmap;    break;  // kGlowMap
                 case 4:  mesh.shadingModel = ShadingModel::FaceGen;    break;  // kFaceGen
                 case 5:  mesh.shadingModel = ShadingModel::FaceGenRGB; break;  // kFaceGenRGBTint
                 case 6:  mesh.shadingModel = ShadingModel::HairTint;   break;  // kHairTint
@@ -1430,10 +1450,18 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 if (sf2 & (1 << 25)) mesh.shaderFlags |= ShaderFlags::SoftLighting;      // SLSF2_SOFT_LIGHTING
                 if (sf2 & (1 << 26)) mesh.shaderFlags |= ShaderFlags::RimLighting;       // SLSF2_RIM_LIGHTING
                 if (sf2 & (1 << 27)) mesh.shaderFlags |= ShaderFlags::BackLighting;      // SLSF2_BACK_LIGHTING
+                if (sf1 & (1 << 22)) mesh.shaderFlags |= ShaderFlags::OwnEmit;           // SLSF1_OWN_EMIT
+
+                std::copy_n(shader->emissiveColor, 3, mesh.emissiveColor);
+                mesh.emissiveMultiple = shader->emissiveMultiple;
+
+                ApplyMaterialVariant(mesh, *shader, shape.name, device);
 
                 SKSE::log::info("[NifMeshLoader] Shape '{}' shader: type={} sf1=0x{:08X} sf2=0x{:08X} -> flags=0x{:X}",
                                 shape.name, shader->shaderType,
                                 sf1, sf2, static_cast<uint32_t>(mesh.shaderFlags));
+            } else {
+                SetupEffectMaterial(mesh, *shader, nif.GetAlpha(shape.alphaProperty), shape.hasNormals, shape.name);
             }
         }
 
@@ -1496,6 +1524,14 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
                 for (int a = 0; a < 3; ++a) {
                     if (v.position[a] < mesh.boundsMin[a]) mesh.boundsMin[a] = v.position[a];
                     if (v.position[a] > mesh.boundsMax[a]) mesh.boundsMax[a] = v.position[a];
+                }
+            }
+            // Effect shapes (glow cards, shells) must not change camera framing,
+            // which was computed without them before they were drawn: their
+            // bounds collapse to their centre.
+            if (mesh.isEffect) {
+                for (int a = 0; a < 3; ++a) {
+                    mesh.boundsMin[a] = mesh.boundsMax[a] = (mesh.boundsMin[a] + mesh.boundsMax[a]) * 0.5f;
                 }
             }
         }

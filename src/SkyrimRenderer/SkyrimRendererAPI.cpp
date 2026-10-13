@@ -6,6 +6,9 @@
 #include "SkyrimRenderer/SkyPatcherService.h"
 #include "SkyrimRenderer/MorphTypes.h"
 #include "SkyrimRenderer/GameNifProbe.h"
+#include "SkyrimRenderer/ExportEncoders.h"
+#include "SkyrimRenderer/ItemPreview.h"
+#include "SkyrimRenderer/TurntableExporter.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -168,7 +171,9 @@ SKYRIMRENDERER_API void SkyrimRenderer_PrecompileShaders(void) {
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_Shutdown(void) {
-    SceneManager::GetInstance().Shutdown(SKYRIMRENDERER_CALLER);
+    const auto consumer = SKYRIMRENDERER_CALLER;
+    TurntableExporter::Get().Shutdown(consumer);
+    SceneManager::GetInstance().Shutdown(consumer);
 }
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetRenderCompleteCallback(SkyrimRenderer_RenderCallback callback) {
@@ -741,4 +746,286 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* 
     if (out_exposure) *out_exposure = exposure;
     if (out_whitePoint) *out_whitePoint = whitePoint;
     return rs ? 1 : 0;
+}
+
+// ---- Export (API 10) ----
+
+static_assert(SKYRIMRENDERER_EXPORT_SHEET == static_cast<uint32_t>(TurntableExporter::Format::Sheet) &&
+              SKYRIMRENDERER_EXPORT_FRAMES == static_cast<uint32_t>(TurntableExporter::Format::Frames) &&
+              SKYRIMRENDERER_EXPORT_APNG == static_cast<uint32_t>(TurntableExporter::Format::APNG) &&
+              SKYRIMRENDERER_EXPORT_GIF == static_cast<uint32_t>(TurntableExporter::Format::GIF));
+static_assert(SKYRIMRENDERER_EXPORT_STEP_YAW == TurntableExporter::kStepYaw &&
+              SKYRIMRENDERER_EXPORT_STEP_TIME == TurntableExporter::kStepTime &&
+              SKYRIMRENDERER_EXPORT_INCLUSIVE_END == TurntableExporter::kInclusiveEnd);
+static_assert(SKYRIMRENDERER_EXPORT_STATE_UNKNOWN == static_cast<uint32_t>(TurntableExporter::State::Unknown) &&
+              SKYRIMRENDERER_EXPORT_STATE_RENDERING == static_cast<uint32_t>(TurntableExporter::State::Rendering) &&
+              SKYRIMRENDERER_EXPORT_STATE_WRITING == static_cast<uint32_t>(TurntableExporter::State::Writing) &&
+              SKYRIMRENDERER_EXPORT_STATE_DONE == static_cast<uint32_t>(TurntableExporter::State::Done) &&
+              SKYRIMRENDERER_EXPORT_STATE_FAILED == static_cast<uint32_t>(TurntableExporter::State::Failed) &&
+              SKYRIMRENDERER_EXPORT_STATE_CANCELLED == static_cast<uint32_t>(TurntableExporter::State::Cancelled));
+static_assert(SKYRIMRENDERER_ITEM_FEMALE == ItemPreview::kFemale &&
+              SKYRIMRENDERER_ITEM_GROUND_MODEL == ItemPreview::kGroundModel &&
+              SKYRIMRENDERER_ITEM_APPEND == ItemPreview::kAppend &&
+              SKYRIMRENDERER_ITEM_KEEP_CAMERA == ItemPreview::kKeepCamera &&
+              SKYRIMRENDERER_ITEM_KEEP_BACKGROUND == ItemPreview::kKeepBackground);
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportFrames(const SkyrimRenderer_ExportFramesDesc* desc) {
+    if (!desc || desc->structSize < sizeof(SkyrimRenderer_ExportFramesDesc)) return 0;
+    TurntableExporter::Desc d;
+    d.scene         = ToScene(desc->scene);
+    d.actor         = ToActor(desc->actor);
+    d.format        = static_cast<TurntableExporter::Format>(desc->format);
+    d.flags         = desc->flags;
+    d.frameCount    = desc->frameCount;
+    d.startYaw      = desc->startYaw;
+    d.endYaw        = desc->endYaw;
+    d.startTime     = desc->startTime;
+    d.endTime       = desc->endTime;
+    d.width         = desc->width;
+    d.height        = desc->height;
+    d.frameDelayMs  = desc->frameDelayMs;
+    d.loopCount     = desc->loopCount;
+    d.columns       = desc->columns;
+    d.framesPerTick = desc->framesPerTick;
+    d.outPath       = ExportEncoders::PathFromUtf8(desc->outPath);
+    return TurntableExporter::Get().Start(d, SKYRIMRENDERER_CALLER);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportTurntable(
+    uint32_t scene, uint32_t frameCount, float startYaw, float endYaw,
+    uint32_t format, const char* outPath, uint32_t flags) {
+    TurntableExporter::Desc d;
+    d.scene      = ToScene(scene);
+    d.format     = static_cast<TurntableExporter::Format>(format);
+    d.flags      = TurntableExporter::kStepYaw | (flags & TurntableExporter::kInclusiveEnd);
+    d.frameCount = frameCount;
+    d.startYaw   = startYaw;
+    d.endYaw     = endYaw;
+    d.outPath    = ExportEncoders::PathFromUtf8(outPath);
+    return TurntableExporter::Get().Start(d, SKYRIMRENDERER_CALLER);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportAnimationFrames(
+    uint32_t scene, uint32_t actor, uint32_t frameCount, float startTime, float endTime,
+    uint32_t format, const char* outPath, uint32_t flags) {
+    TurntableExporter::Desc d;
+    d.scene      = ToScene(scene);
+    d.actor      = ToActor(actor);
+    d.format     = static_cast<TurntableExporter::Format>(format);
+    d.flags      = TurntableExporter::kStepTime |
+                   (flags & (TurntableExporter::kInclusiveEnd | TurntableExporter::kStepYaw));
+    d.frameCount = frameCount;
+    d.startTime  = startTime;
+    d.endTime    = endTime;
+    if (d.flags & TurntableExporter::kStepYaw) {
+        // A full turn starting where the camera is.
+        auto* rs = SceneManager::GetInstance().GetScene(d.scene);
+        d.startYaw = d.endYaw = rs ? rs->GetCameraYaw() : 0.0f;
+    }
+    d.outPath = ExportEncoders::PathFromUtf8(outPath);
+    return TurntableExporter::Get().Start(d, SKYRIMRENDERER_CALLER);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetExportStatus(uint32_t job, SkyrimRenderer_ExportStatus* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_ExportStatus)) return 0;
+    TurntableExporter::Status st;
+    const bool known = TurntableExporter::Get().GetStatus(job, st);
+    const uint32_t structSize = out->structSize;
+    std::memset(out, 0, sizeof(SkyrimRenderer_ExportStatus));
+    out->structSize     = structSize;
+    out->state          = static_cast<uint32_t>(st.state);
+    out->result         = FromResult(st.result);
+    out->scene          = static_cast<uint32_t>(st.scene);
+    out->framesRendered = st.framesRendered;
+    out->framesWritten  = st.framesWritten;
+    out->frameCount     = st.frameCount;
+    return known ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_CancelExport(uint32_t job) {
+    TurntableExporter::Get().Cancel(job);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_ReleaseExport(uint32_t job) {
+    TurntableExporter::Get().Release(job);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetExportCompleteCallback(SkyrimRenderer_ExportCallback callback) {
+    const auto consumer = SKYRIMRENDERER_CALLER;
+    if (!callback) {
+        TurntableExporter::Get().SetCompleteCallback(nullptr, consumer);
+        return;
+    }
+    TurntableExporter::Get().SetCompleteCallback(
+        [callback](uint32_t job, SceneHandle scene, TurntableExporter::State state, Result result,
+                   const std::string& path) {
+            callback(job, static_cast<uint32_t>(scene), static_cast<uint32_t>(state), FromResult(result),
+                     path.c_str());
+        },
+        consumer);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportPNGScaled(uint32_t scene, const char* filePath, float scale) {
+    return FromResult(SkyrimRenderer::ExportPNGScaled(ToScene(scene), ExportEncoders::PathFromUtf8(filePath), scale));
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint32_t formID, uint32_t flags) {
+    return ItemPreview::Load(ToScene(scene), static_cast<RE::FormID>(formID), flags);
+}
+
+// ---- Scene look (API 10) ---------------------------------------------------
+
+namespace {
+SceneLook* GetSceneLook(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetSceneLook() : nullptr;
+}
+}  // namespace
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetGroundShadow(uint32_t scene, uint32_t mode, float opacity, float softness) {
+    if (auto* look = GetSceneLook(scene)) look->SetGroundShadow(static_cast<GroundShadowMode>(mode), opacity, softness);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetSelfShadow(uint32_t scene, int32_t enabled, float strength) {
+    if (auto* look = GetSceneLook(scene)) look->SetSelfShadow(enabled != 0, strength);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetAmbientOcclusion(uint32_t scene, int32_t enabled, float radius, float intensity) {
+    if (auto* look = GetSceneLook(scene)) look->SetAmbientOcclusion(enabled != 0, radius, intensity);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugView(uint32_t scene, uint32_t mode) {
+    if (auto* look = GetSceneLook(scene)) look->SetDebugView(static_cast<DebugViewMode>(mode));
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugViewBone(uint32_t scene, const char* boneName) {
+    if (auto* look = GetSceneLook(scene)) look->SetDebugViewBone(boneName ? boneName : "");
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_SceneLookState)) return 0;
+    auto* look = GetSceneLook(scene);
+    if (!look) return 0;
+    const SceneLookSettings s = look->GetSettings();
+    const uint32_t structSize = out->structSize;
+    std::memset(out, 0, sizeof(SkyrimRenderer_SceneLookState));
+    out->structSize = structSize;
+    out->groundShadowMode = static_cast<uint32_t>(s.ground.mode);
+    out->groundShadowOpacity = s.ground.opacity;
+    out->groundShadowSoftness = s.ground.softness;
+    out->selfShadow = s.selfShadow.enabled ? 1 : 0;
+    out->selfShadowStrength = s.selfShadow.strength;
+    out->ambientOcclusion = s.ao.enabled ? 1 : 0;
+    out->aoRadius = s.ao.radius;
+    out->aoIntensity = s.ao.intensity;
+    out->debugView = static_cast<uint32_t>(s.debugView);
+    const size_t n = std::min(s.debugBone.size(), sizeof(out->debugViewBone) - 1);
+    std::memcpy(out->debugViewBone, s.debugBone.data(), n);
+    return 1;
+}
+
+// --- API 10: equipment & picking --------------------------------------------
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn) {
+    if (hand != SKYRIMRENDERER_HAND_RIGHT && hand != SKYRIMRENDERER_HAND_LEFT) {
+        return FromResult(Result::InvalidParameter);
+    }
+    const auto h = hand == SKYRIMRENDERER_HAND_LEFT ? ActorPreview::HeldHand::Left : ActorPreview::HeldHand::Right;
+    return FromResult(SceneManager::GetInstance().EquipWeapon(
+        ToActor(actor), static_cast<RE::FormID>(formID), h, drawn != 0));
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_UnequipWeapon(uint32_t actor, uint32_t formID) {
+    return FromResult(SceneManager::GetInstance().UnequipWeapon(ToActor(actor), static_cast<RE::FormID>(formID)));
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetWeaponsDrawn(uint32_t actor, int32_t drawn) {
+    SceneManager::GetInstance().SetWeaponsDrawn(ToActor(actor), drawn != 0);
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeldItems(
+    uint32_t actor, uint32_t* out_formIDs, uint32_t* out_hands, uint32_t maxCount) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    if (!a || !out_formIDs) return 0;
+    const auto items = a->GetHeldItems();
+    const uint32_t count = std::min(static_cast<uint32_t>(items.size()), maxCount);
+    for (uint32_t i = 0; i < count; ++i) {
+        out_formIDs[i] = static_cast<uint32_t>(items[i].first);
+        if (out_hands) out_hands[i] = static_cast<uint32_t>(items[i].second);
+    }
+    return count;
+}
+
+namespace {
+
+void ToApiPick(const RenderScene::PickHit& hit, ActorHandle actor, SkyrimRenderer_PickResult& out) {
+    const uint32_t structSize = out.structSize;
+    std::memset(&out, 0, sizeof(out));
+    out.structSize = structSize;
+    out.hit = hit.hit ? 1 : 0;
+    out.x = hit.x;
+    out.y = hit.y;
+    if (!hit.hit) return;
+    out.actor = static_cast<uint32_t>(actor);
+    out.formID = hit.formID;
+    out.slotMask = hit.slotMask;
+    out.kind = hit.kind;
+    out.flags = hit.flags;
+    out.meshIndex = hit.meshIndex;
+    strncpy_s(out.shapeName, sizeof(out.shapeName), hit.shapeName.c_str(), _TRUNCATE);
+}
+
+}  // namespace
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PickAt(uint32_t scene, uint32_t x, uint32_t y, SkyrimRenderer_PickResult* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_PickResult)) return 0;
+    RenderScene::PickHit hit;
+    ActorHandle actor = ActorHandle::Invalid;
+    const bool found = SceneManager::GetInstance().PickAt(ToScene(scene), x, y, hit, actor);
+    ToApiPick(hit, actor, *out);
+    return found ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_RequestPick(uint32_t scene, uint32_t x, uint32_t y) {
+    SceneManager::GetInstance().RequestPick(ToScene(scene), x, y);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetPickResult(uint32_t scene, SkyrimRenderer_PickResult* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_PickResult)) return 0;
+    RenderScene::PickHit hit;
+    ActorHandle actor = ActorHandle::Invalid;
+    if (!SceneManager::GetInstance().GetPickResult(ToScene(scene), hit, actor)) return 0;
+    ToApiPick(hit, actor, *out);
+    return 1;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
+    uint32_t actor, uint32_t formID, const SkyrimRenderer_Color* color, uint32_t mode, uint32_t outlineWidth) {
+    SkyrimRenderer::Color c{1.0f, 0.8f, 0.2f, 1.0f};
+    if (color) c = {color->r, color->g, color->b, color->a};
+    return SceneManager::GetInstance().SetHighlight(ToActor(actor), formID, c, mode, outlineWidth) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID) {
+    SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
+}
+
+// ---- Materials (API 10) ----
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEffectShadersEnabled(enabled != 0);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs && rs->GetEffectShadersEnabled() ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEmissiveScale(scale);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetEmissiveScale() : 1.0f;
 }

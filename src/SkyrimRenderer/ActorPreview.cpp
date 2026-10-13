@@ -24,6 +24,8 @@
 #include "SkyrimRenderer/SkyPatcherService.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/HKXLoader.h"
+#include "SkyrimRenderer/FaceMorphs.h"
+#include "SkyrimRenderer/LiveMirror.h"
 
 namespace SkyrimRenderer {
 
@@ -369,6 +371,9 @@ ActorPreview::~ActorPreview() {
         scene_.RemoveNode(sceneNodeHandle_);
     }
 
+    // Highlights are keyed by this preview: drop them with it.
+    scene_.ClearHighlight(this, SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS);
+
     equippedItems_.clear();
 
     actorNode_ = nullptr;
@@ -408,9 +413,10 @@ Result ActorPreview::CloneFromLoaded(RE::Actor* actor) {
     // Clear any previously loaded meshes
     scene_.ClearLoadedMeshes();
 
-    // Collect base outfit from biped data
+    // Collect base outfit from the third-person biped (GetCurrentBiped is the
+    // first-person one while the player is in first person: arms only)
     baseOutfit_.clear();
-    const auto& biped = actor->GetCurrentBiped();
+    const auto& biped = actor->GetBiped(false);
     if (biped) {
         for (uint32_t slot = 0; slot < 32; ++slot) {
             auto& bipedObj = biped->objects[slot];
@@ -491,6 +497,7 @@ bool ActorPreview::RestsOnNifBindPose() const {
 void ActorPreview::ResetGPUSkinningPose() {
     if (RestsOnNifBindPose() && ApplyNifBindPose()) return;
     gpuPose_.clear();
+    ++poseGeneration_;
     scene_.SetGPUSkinningPose(nullptr);
 }
 
@@ -593,6 +600,11 @@ Result ActorPreview::EquipItem(RE::FormID armorFormID) {
     if (headOnly_) return Result::InvalidParameter;
     std::lock_guard lock(mutex_);
 
+    // Weapons, torches and ammo: held items (torch -> left hand), current drawn state.
+    if (IsHeldItemForm(armorFormID)) {
+        return EquipHeldItemLocked(armorFormID, HeldHand::Right, heldDrawn_);
+    }
+
     if (!actorNode_ || !baseNPC_) return Result::InvalidHandle;
 
     // Look up the armor form
@@ -671,6 +683,8 @@ Result ActorPreview::UnequipItem(RE::FormID armorFormID) {
 
     if (!actorNode_) return Result::InvalidHandle;
 
+    if (IsHeldItemForm(armorFormID)) return UnequipHeldItemLocked(armorFormID);
+
     DetachArmor(armorFormID);
 
     // Remove from equipped list
@@ -695,6 +709,23 @@ Result ActorPreview::EquipOutfit(const std::vector<RE::FormID>& armorFormIDs, bo
     std::lock_guard lock(mutex_);
 
     if (!actorNode_ || !baseNPC_) return Result::InvalidHandle;
+
+    // Weapons, torches and ammo in the list become the held items (with
+    // replaceAll they replace the current ones). RebuildMeshes reloads them.
+    std::vector<RE::FormID> heldForms;
+    for (RE::FormID formID : armorFormIDs) {
+        if (IsHeldItemForm(formID)) heldForms.push_back(formID);
+    }
+    if (!heldForms.empty()) {
+        if (replaceAll) heldItems_.clear();
+        // A second one-handed weapon in the list goes to the left hand.
+        bool rightTaken = false;
+        for (RE::FormID formID : heldForms) {
+            auto* weapon = RE::TESForm::LookupByID<RE::TESObjectWEAP>(formID);
+            const HeldHand hand = (weapon && rightTaken) ? HeldHand::Left : HeldHand::Right;
+            if (Succeeded(EquipHeldItemLocked(formID, hand, heldDrawn_)) && weapon) rightTaken = true;
+        }
+    }
 
     std::vector<RE::FormID> mergedOutfit;
 
@@ -761,6 +792,9 @@ void ActorPreview::UnequipAll() {
         DetachArmor(eq.formID);
     }
     equippedItems_.clear();
+
+    heldItems_.clear();
+    RemoveHeldItemMeshes();
 
     RE::NiUpdateData updateData;
     actorNode_->Update(updateData);
@@ -1268,6 +1302,7 @@ void ActorPreview::ApplyPoseGPUSkinning(const BonePoseMap& pose) {
     }
 
     scene_.SetGPUSkinningPose(&gpuPose_);
+    ++poseGeneration_;  // gpuPose_ was reassigned: live mirror slots are stale
 }
 
 void ActorPreview::ApplyPoseToMeshes(const BonePoseMap& pose) {
@@ -1855,7 +1890,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
     const bool offsets = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
     const bool recompute = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_RECOMPUTE_NORMALS) != 0;
 
-    bool changed = headDriveDirty_;
+    bool changed = headDriveDirty_ || ds.stale;
     if (!changed) {
         if (offsets) {
             for (size_t k = 0; k < count; ++k) {
@@ -1867,6 +1902,10 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
     }
     if (!changed) return 0;
 
+    // Cleared on success only: if anything below throws (scratch / staging
+    // allocation), `uploaded` no longer matches the GPU, and the next change
+    // check would otherwise see the new positions as already sent.
+    ds.stale = true;
     for (size_t k = 0; k < count; ++k) {
         ds.uploaded[k] = offsets ? ds.rest[k] + ds.positions[k] : ds.positions[k];
     }
@@ -1887,6 +1926,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
         ds.staged.clear();
     }
     ds.pending = true;
+    ds.stale = false;
     return static_cast<uint32_t>(n);
 }
 
@@ -2354,6 +2394,11 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     using MeshLoadRequest = RenderScene::MeshLoadRequest;
     std::vector<MeshLoadRequest> batchRequests;
 
+    // What each request loads, stamped on its meshes for picking / highlight.
+    // Head requests are attributed from headPartBatch / faceGenBatchIndex.
+    struct MeshSource { uint8_t kind; RE::FormID formID; uint32_t slots; };
+    std::unordered_map<size_t, MeshSource> requestSources;
+
     // Armor addon meshes + compute addon visual coverage mask
     uint32_t addonCoveredSlots = 0;
     for (auto& ai : armorInfos) {
@@ -2375,6 +2420,8 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                     ensureMeshPrefix(meshPath),
                     MeshTag::Equipment, "", weight, useGPUSkinning_
                 });
+                requestSources[batchRequests.size() - 1] = {
+                    static_cast<uint8_t>(SKYRIMRENDERER_PICK_ARMOR), ai.formID, armorAddon->GetSlotMask().underlying()};
             }
         }
         EquippedItemInfo info;
@@ -2398,18 +2445,21 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Body_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
         });
+        requestSources[batchRequests.size() - 1] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_BODY), 0, 1u << 2};
     }
     if (!headOnly_ && !(addonCoveredSlots & (1u << 3))) {  // slot 33 = Hands
         batchRequests.push_back({
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Hands_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
         });
+        requestSources[batchRequests.size() - 1] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_BODY), 0, 1u << 3};
     }
     if (!headOnly_ && !(addonCoveredSlots & (1u << 7))) {  // slot 37 = Feet
         batchRequests.push_back({
             std::string("meshes\\Actors\\Character\\Character Assets\\") + bodyPrefix + "Feet_1.nif",
             MeshTag::Body, "", weight, useGPUSkinning_, coveredSlotMask
         });
+        requestSources[batchRequests.size() - 1] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_BODY), 0, 1u << 7};
     }
 
     // Head / FaceGen + head parts — gated on ARMA addon visual coverage.
@@ -2562,6 +2612,35 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         std::chrono::steady_clock::now() - batchStart).count();
     SKSE::log::info("[SkyrimRenderer::Perf] RebuildMeshes batch load: {}ms ({} requests, {} meshes)",
                     batchMs, batchRequests.size(), totalLoaded);
+
+    // Stamp every loaded mesh with its source (before baked FaceGen parts are
+    // dropped below: indices are still the batch's).
+    {
+        if (faceGenBatchIndex != SIZE_MAX) {
+            requestSources[faceGenBatchIndex] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_BODY), 0, 1u << 0};
+        }
+        for (const auto& [part, batchIdx] : headPartBatch) {
+            if (part == playerFacePart) continue;  // the player's face is the head itself
+            const bool hair = part->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
+            requestSources[batchIdx] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_HEADPART), part->GetFormID(),
+                                        hair ? (1u << 1) : (1u << 0)};
+        }
+        auto& loaded = scene_.GetLoadedMeshesMut();
+        for (size_t r = 0; r < batchRequests.size(); ++r) {
+            const auto src = requestSources.find(r);
+            for (uint32_t j = 0; j < batchRequests[r].meshCount; ++j) {
+                const uint32_t idx = batchRequests[r].meshStartIndex + j;
+                if (idx >= loaded.size()) break;
+                auto& mesh = loaded[idx];
+                mesh.owner = this;
+                if (src != requestSources.end()) {
+                    mesh.sourceKind = src->second.kind;
+                    mesh.sourceFormID = src->second.formID;
+                    mesh.sourceSlotMask = src->second.slots;
+                }
+            }
+        }
+    }
 
     // Track loaded NIF paths for bone hierarchy merging
     for (const auto& req : batchRequests) {
@@ -2944,6 +3023,9 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         }
     }
 
+    // Held items (weapons, torch, ammo) outlive outfit rebuilds.
+    LoadHeldItemMeshes();
+
     // Re-apply current animation pose to the newly loaded meshes so they
     // don't show a 1-frame bind-pose flash. Also ensures hair bones get
     // correct transforms from the first frame.
@@ -2962,6 +3044,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     }
 
     if (headOnly_) BuildDrivenHead(partsByMesh);
+    ++meshGeneration_;  // mesh indices changed: expression / live mirror bindings are stale
 
     auto rebuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - rebuildStart).count();

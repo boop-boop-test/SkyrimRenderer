@@ -12,6 +12,16 @@
 
 namespace SkyrimRenderer {
 
+/// Part of the full frame a render covers, for exports that render a frame in
+/// tiles. x0..x1 / y0..y1 are the tile's edges in the full frame's NDC (-1..1,
+/// y up); aspect is the full frame's width / height (0 = the render target's).
+/// The default is the whole frame at the target's aspect: no change.
+struct ProjectionWindow {
+    float aspect = 0.0f;
+    float x0 = -1.0f, y0 = -1.0f, x1 = 1.0f, y1 = 1.0f;
+    bool IsFull() const { return aspect <= 0.0f && x0 == -1.0f && y0 == -1.0f && x1 == 1.0f && y1 == 1.0f; }
+};
+
 /// Orbit camera controller for the preview renderer.
 /// Manages yaw/pitch/distance/focalHeight parameters and computes
 /// camera position + view-projection matrix.
@@ -57,6 +67,10 @@ public:
     bool IsDirty() const { return dirty_; }
     void MarkDirty() { dirty_ = true; }
 
+    /// Tiled exports: GetProjection covers only `window` of the full frame.
+    void SetProjectionWindow(const ProjectionWindow& window) { window_ = window; }
+    const ProjectionWindow& GetProjectionWindow() const { return window_; }
+
 private:
     void ComputeSceneBounds(RE::NiNode* sceneRoot,
                             RE::NiPoint3& outCenter, float& outRadius) const;
@@ -80,6 +94,8 @@ private:
     float orbitCenterX_ = 0.0f;
     float orbitCenterY_ = 0.0f;
     bool orbitCenterValid_ = false;
+
+    ProjectionWindow window_;
 };
 
 } // namespace SkyrimRenderer

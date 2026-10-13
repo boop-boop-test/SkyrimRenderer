@@ -5,6 +5,7 @@
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TextureLoader.h"
 #include "SkyrimRenderer/WorkerPool.h"
+#include "SkyrimRenderer/SkyrimRendererAPI.h"
 
 #include <RE/R/Renderer.h>
 #include <SKSE/SKSE.h>
@@ -173,9 +174,13 @@ void SceneManager::Tick() {
         dt = std::min(dt, 0.1f);  // cap at 100ms to avoid huge jumps on hitches
     }
     lastFrameTime_ = now;
+    TickLiveMirrors(dt);  // before animations: a POSE mirror drops the preview's clip
     if (dt > 0.0f) {
         TickAnimations(dt);
     }
+
+    // Async picks copied by an earlier render: read the texel (no GPU wait)
+    CollectPicks();
 
     ProcessPendingRenders();
 }
@@ -338,9 +343,14 @@ Result SceneManager::GuardedRender(RenderScene* scene, const char* where) {
     return GuardedRenderBatch({scene}, where);
 }
 
-Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where) {
+Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where,
+                                        std::vector<Result>* perScene) {
+    if (perScene) perScene->assign(scenes.size(), Result::Success);
     if (scenes.empty()) return Result::InvalidHandle;
-    if (IsDeviceLost()) return Result::DeviceLost;
+    if (IsDeviceLost()) {
+        if (perScene) perScene->assign(scenes.size(), Result::DeviceLost);
+        return Result::DeviceLost;
+    }
 
     using Clock = std::chrono::steady_clock;
     auto ms = [](Clock::duration d) { return std::chrono::duration<float, std::milli>(d).count(); };
@@ -375,11 +385,17 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     }
 
     const auto prepStart = Clock::now();
-    WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
-        const auto t0 = Clock::now();
-        jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
-        jobs[j].ms = ms(Clock::now() - t0);
-    });
+    try {
+        WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
+            const auto t0 = Clock::now();
+            jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
+            jobs[j].ms = ms(Clock::now() - t0);
+        });
+    } catch (...) {
+        // Already logged per job. The other shapes still upload; a failed one
+        // stays stale (DrivenShape::stale) and is prepared again next render.
+        SKSE::log::warn("[SkyrimRenderer] {}: driven-head prep failed; retrying those shapes next render", where);
+    }
     const float callPrepMs = ms(Clock::now() - prepStart);
 
     std::vector<RenderScene::RenderStats> stats(scenes.size());
@@ -396,6 +412,19 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     }
     headLocks.clear();
 
+    // Expression morphs (SetFaceMorph, live mirror FACE): upload the changed ones.
+    std::vector<ActorPreview*> faces;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& [id, actor] : actors_) {
+            if (!actor || !actor->HasFaceMorphs()) continue;
+            if (std::find(scenes.begin(), scenes.end(), &actor->GetScene()) != scenes.end()) {
+                faces.push_back(actor.get());
+            }
+        }
+    }
+    for (auto* actor : faces) actor->FlushFaceMorphs();
+
     // One save / restore of the immediate context for a batch; a single scene
     // keeps its own inside Render, as before.
     Result result = Result::Success;
@@ -407,6 +436,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
             const auto t0 = Clock::now();
             const Result r = scenes[i]->Render(!batched);
             stats[i].renderMs = ms(Clock::now() - t0);
+            if (perScene) (*perScene)[i] = r;
             if (Failed(r) && !Failed(result)) result = r;
         }
     }
@@ -420,6 +450,11 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
         stats[i].callPrepMs = callPrepMs;
         stats[i].callMs = callMs;
         scenes[i]->SetLastRenderStats(stats[i]);
+    }
+    if (!healthy && perScene) {
+        for (auto& r : *perScene) {
+            if (!Failed(r)) r = Result::DeviceLost;
+        }
     }
     return healthy ? result : Result::DeviceLost;
 }
@@ -758,20 +793,38 @@ Result SceneManager::RenderToTexture(SceneHandle scene) {
 
 Result SceneManager::RenderToTextures(const SceneHandle* scenes, uint32_t count) {
     if (!scenes || count == 0) return Result::InvalidHandle;
-    Result missing = Result::Success;
+    // Every valid scene renders; the result is the first failure in input
+    // order (an invalid handle at its own position, as the API documents).
+    constexpr size_t kInvalid = SIZE_MAX;
     std::vector<RenderScene*> list;
+    std::vector<size_t> slot(count, kInvalid);  // input position -> index in list
     list.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         auto* s = GetScene(scenes[i]);
-        if (!s) {
-            missing = Result::InvalidHandle;
-            continue;
-        }
-        if (std::find(list.begin(), list.end(), s) == list.end()) list.push_back(s);
+        if (!s) continue;
+        const auto it = std::find(list.begin(), list.end(), s);
+        slot[i] = static_cast<size_t>(it - list.begin());
+        if (it == list.end()) list.push_back(s);
     }
-    if (list.empty()) return missing;
-    const Result result = GuardedRenderBatch(list, "RenderToTextures");
-    return Failed(result) ? result : missing;
+    if (list.empty()) return Result::InvalidHandle;
+    std::vector<Result> perScene;
+    GuardedRenderBatch(list, "RenderToTextures", &perScene);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Result r = slot[i] == kInvalid ? Result::InvalidHandle : perScene[slot[i]];
+        if (Failed(r)) return r;
+    }
+    return Result::Success;
+}
+
+Result SceneManager::RenderSceneInto(SceneHandle scene, RenderTargetManager& target,
+                                     const ProjectionWindow& window) {
+    auto* s = GetScene(scene);
+    if (!s) return Result::InvalidHandle;
+    if (!target.IsValid()) return Result::InvalidParameter;
+    s->BeginTargetOverride(target, window);
+    const Result result = GuardedRender(s, "RenderSceneInto");
+    s->EndTargetOverride(target);
+    return result;
 }
 
 bool SceneManager::GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out) {
@@ -958,6 +1011,45 @@ ActorHandle SceneManager::LoadActorHead(SceneHandle scene, RE::FormID formID) {
     actorToScene_[id] = sceneId;
     SKSE::log::info("[SkyrimRenderer] Created head preview {} for 0x{:X} in scene {}", id, formID, sceneId);
     return static_cast<ActorHandle>(id);
+}
+
+ActorHandle SceneManager::LoadActorFromReference(SceneHandle scene, RE::FormID refFormID, uint32_t mirrorFlags) {
+    const ActorHandle handle = LoadActorPreview(scene, refFormID);
+    auto* preview = GetActorPreview(handle);
+    if (!preview) return handle;
+
+    // One snapshot of the live pose and expression, whatever the flags (pinned
+    // and scaled as the mirror will be, so camera presets framed on it hold).
+    auto* form = RE::TESForm::LookupByID(refFormID);
+    auto* live = form ? form->As<RE::Actor>() : nullptr;
+    const uint32_t snapshotFlags = SKYRIMRENDERER_MIRROR_POSE | SKYRIMRENDERER_MIRROR_FACE |
+        (mirrorFlags & (SKYRIMRENDERER_MIRROR_PIN_NECK | SKYRIMRENDERER_MIRROR_LIVE_SCALE));
+    if (live && live->Is3DLoaded() && Succeeded(preview->SetLiveMirror(refFormID, snapshotFlags))) {
+        preview->TickLiveMirror(0.0f);
+    }
+    // Then keep mirroring with the caller's flags (0 stops; the snapshot stays).
+    preview->SetLiveMirror(refFormID, mirrorFlags);
+    SKSE::log::info("[SkyrimRenderer] Actor {} recreated from reference 0x{:X} (mirror flags 0x{:X})",
+                    static_cast<uint32_t>(handle), refFormID, mirrorFlags);
+    return handle;
+}
+
+void SceneManager::TickLiveMirrors(float deltaSeconds) {
+    std::lock_guard lock(mutex_);
+    for (auto& [id, actor] : actors_) {
+        if (!actor || !actor->HasLiveMirror() || !actor->TickLiveMirror(deltaSeconds)) continue;
+        auto sceneIt = actorToScene_.find(id);
+        if (sceneIt == actorToScene_.end()) continue;
+        // Only scenes somebody shows: a plain scene would render to readback.
+        auto s = scenes_.find(sceneIt->second);
+        const bool shown = compositeRects_.contains(sceneIt->second) ||
+                           (s != scenes_.end() && s->second && s->second->IsTextureMode());
+        if (!shown) continue;
+        const auto handle = static_cast<SceneHandle>(sceneIt->second);
+        if (std::find(pendingRenders_.begin(), pendingRenders_.end(), handle) == pendingRenders_.end()) {
+            pendingRenders_.push_back(handle);
+        }
+    }
 }
 
 ActorPreview* SceneManager::GetActorPreview(ActorHandle handle) {

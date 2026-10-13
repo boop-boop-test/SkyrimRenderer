@@ -16,8 +16,12 @@
 
 struct SkyrimRenderer_HeadShapeInfo;
 struct SkyrimRenderer_HeadSourceInfo;
+struct SkyrimRenderer_LiveMirrorStatus;
 
 namespace SkyrimRenderer {
+
+class LiveMirror;
+class FaceMorphController;
 
 /// Resolve the HKX skeleton path from race + sex + skeleton NIF path.
 std::string ResolveSkeletonHkxPath(RE::TESRace* race, bool isFemale,
@@ -65,6 +69,30 @@ public:
 
     /// Get the list of currently equipped armor FormIDs.
     std::vector<RE::FormID> GetEquippedItems() const;
+
+    // ── Held Items (ActorPreviewHeldItems.cpp) ──────────────────────────────
+    // Weapons, torches and ammo hang rigidly from skeleton nodes (hand nodes
+    // when drawn, sheath nodes when not) and follow the pose. Shields are
+    // armor (skinned to SHIELD) kept in the equipped list. Node rules: see
+    // SkyrimRenderer_EquipWeapon in SkyrimRendererAPI.h.
+
+    enum class HeldHand : uint32_t { Right = 0, Left = 1, Both = 2, None = 3 };
+
+    /// WEAP, LIGH, AMMO, or ARMO in the shield slot.
+    static bool IsHeldItemForm(RE::FormID formID);
+
+    /// Equip a held item; `hand` is ignored where the item fixes it (torch:
+    /// left, ammo: none, two-handed: both, shield: left). Sets the drawn state
+    /// of every held weapon.
+    Result EquipHeldItem(RE::FormID formID, HeldHand hand, bool drawn);
+
+    /// Remove a held item or shield (0 = every held item, not the shield).
+    Result UnequipHeldItem(RE::FormID formID);
+
+    /// Draw or sheathe every held weapon (retargets the meshes, no reload).
+    void SetHeldItemsDrawn(bool drawn);
+
+    std::vector<std::pair<RE::FormID, HeldHand>> GetHeldItems() const;
 
     // ── Body Morphs ──────────────────────────────────────────────────────────
 
@@ -155,6 +183,31 @@ public:
     /// this preview is not the player, has no live-face meshes, or the player's
     /// 3D is not loaded.
     bool RefreshLiveFace();
+
+    // ── Live Mirror (LiveMirror.cpp) ────────────────────────────────────────
+
+    /// Mirror a live actor reference onto this preview every frame
+    /// (SKYRIMRENDERER_MIRROR_*); flags 0 stops. Main thread.
+    Result SetLiveMirror(RE::FormID refFormID, uint32_t flags);
+    bool HasLiveMirror() const { return liveMirror_ != nullptr; }
+    /// One mirror step (SceneManager::Tick, main thread, this actor's lock not
+    /// held). True when the scene should re-render.
+    bool TickLiveMirror(float deltaSeconds);
+    /// False for a too-small struct; refFormID 0 when not mirroring.
+    bool GetLiveMirrorStatus(SkyrimRenderer_LiveMirrorStatus& out) const;
+    /// Camera preset re-applied after a mirrored equipment rebuild (face cam).
+    void SetLiveMirrorCameraPreset(CameraPreset preset);
+
+    // ── Expressions (LiveMirror.cpp, FaceMorphs.cpp) ────────────────────────
+
+    /// SKYRIMRENDERER_FACE_* slot weight on the head parts' expression tris.
+    /// Returns the head meshes with expression morphs (0: none / bad slot).
+    uint32_t SetFaceMorph(uint32_t group, uint32_t index, float weight);
+    void ResetFaceMorphs();
+    bool HasFaceMorphs() const { return faceMorphs_ != nullptr; }
+    /// Upload the changed expression morph buffers. Before each render of this
+    /// actor's scene (SceneManager does it), on the thread that renders.
+    uint32_t FlushFaceMorphs();
 
     // ── Drivable Head (head-only previews) ──────────────────────────────────
 
@@ -333,6 +386,7 @@ private:
         std::vector<float> restTangents;   // xyzw per vertex, as loaded
         std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
         bool pending = false;              // prepared, not yet uploaded
+        bool stale = false;                // a prep threw after `uploaded` changed: redo it
     };
     std::vector<DrivenShape> drivenShapes_;
     uint32_t headDriveFlags_ = 0;
@@ -344,6 +398,41 @@ private:
         bool skyPatcherDonor = false;
     } headSource_;
     std::vector<uint8_t> uploadScratch_;   // SkinnedVertex staging, reused per frame
+
+    // ── Live mirror / expressions ──
+    friend class LiveMirror;
+    friend class FaceMorphController;
+    std::unique_ptr<FaceMorphController> faceMorphs_;
+    std::unique_ptr<LiveMirror> liveMirror_;
+    uint32_t meshGeneration_ = 0;   // bumped by every RebuildMeshes
+    uint32_t poseGeneration_ = 0;   // bumped whenever gpuPose_ is reassigned
+
+    // ── Held items ──
+    enum class HeldType : uint8_t {
+        Sword, Dagger, Axe, Mace, TwoHanded, Bow, Crossbow, Staff, HandToHand, Torch, Arrow, Bolt
+    };
+    struct HeldItem {
+        RE::FormID formID = 0;
+        HeldHand hand = HeldHand::Right;
+        HeldType type = HeldType::Sword;
+        uint8_t kind = 0;                   // SKYRIMRENDERER_PICK_*
+        std::string modelPath;              // "meshes\..." 3rd-person world model
+    };
+    std::vector<HeldItem> heldItems_;
+    bool heldDrawn_ = false;
+    // Rigid meshes per model path (GPU buffers shared by the copies placed in the scene)
+    std::unordered_map<std::string, std::vector<LoadedMesh>> heldMeshCache_;
+
+    Result EquipHeldItemLocked(RE::FormID formID, HeldHand hand, bool drawn);
+    Result UnequipHeldItemLocked(RE::FormID formID);
+    // Append every held item's meshes to the scene (end of RebuildMeshes and
+    // after a held-item change). Caller holds mutex_.
+    void LoadHeldItemMeshes();
+    // Remove this preview's held-item meshes from the scene.
+    void RemoveHeldItemMeshes();
+    // Node a held item hangs from (and its scabbard), for the current drawn state.
+    std::pair<std::string, std::string> ResolveHeldNodes(const HeldItem& item) const;
+    std::string FirstSkeletonNode(std::initializer_list<const char*> names, const char* fallback) const;
 
     mutable std::mutex mutex_;
 };

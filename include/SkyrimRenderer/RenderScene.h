@@ -10,6 +10,8 @@
 #include "SkyrimRenderer/ImageExporter.h"
 #include "SkyrimRenderer/FrameOverlayRenderer.h"
 #include "SkyrimRenderer/PostProcessPass.h"
+#include "SkyrimRenderer/SceneLook.h"
+#include "SkyrimRenderer/PickRenderer.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -122,6 +124,24 @@ public:
     void SetToneMapping(float exposure, float whitePoint);
     void GetToneMapping(float& exposure, float& whitePoint) const;
 
+    // ── Scene look (ground shadow, self-shadow, SSAO, debug views) ──────────
+
+    /// Settings live on the SceneLook (thread-safe setters). Null only when
+    /// the scene failed to initialize.
+    SceneLook* GetSceneLook() const { return sceneLook_.get(); }
+
+    // ── Materials (RenderSceneMaterials.cpp) ────────────────────────────────
+
+    /// Draw BSEffectShaderProperty shapes (glows, flames, auras) unlit after
+    /// the lit passes. Default on.
+    void SetEffectShadersEnabled(bool enabled);
+    bool GetEffectShadersEnabled() const;
+
+    /// Scale on all emission (own emittance, glow / PBR emissive maps, effect
+    /// shapes). Default 1, 0 = none, negative clamps to 0.
+    void SetEmissiveScale(float scale);
+    float GetEmissiveScale() const;
+
     // ── Rendering ───────────────────────────────────────────────────────────
 
     /// saveState: save and restore the immediate context around the render.
@@ -164,6 +184,16 @@ public:
 
     Result ExportPNG(const char* filePath);
     Result ExportDDS(const char* filePath);
+
+    // ── Export targets ──────────────────────────────────────────────────────
+
+    /// Exports: swap `target` in for the scene's own render target, and render
+    /// only `window` of the frame, until EndTargetOverride swaps them back. The
+    /// scene's own target, texture and size stay untouched (consumers' SRVs
+    /// stay valid). Render thread only; nothing else may render this scene
+    /// in between.
+    void BeginTargetOverride(RenderTargetManager& target, const ProjectionWindow& window);
+    void EndTargetOverride(RenderTargetManager& target);
 
     // ── Resize ──────────────────────────────────────────────────────────────
 
@@ -253,6 +283,67 @@ public:
     /// Get the current GPU skinning pose (may be null).
     const BonePoseMap* GetGPUSkinningPose() const { return gpuSkinningPose_; }
 
+    // ── Picking / highlight (RenderScenePicking.cpp) ────────────────────────
+
+    /// The mesh under one render-target pixel.
+    struct PickHit {
+        bool hit = false;
+        uint32_t x = 0, y = 0;
+        uint32_t meshIndex = 0;
+        const void* owner = nullptr;     // LoadedMesh::owner
+        uint32_t formID = 0;
+        uint32_t slotMask = 0;
+        uint8_t kind = 0;
+        uint8_t flags = 0;
+        std::string shapeName;
+    };
+
+    /// Synchronous pick: ID pass now + one-texel readback (GPU wait). Render
+    /// thread only. False on background / out of bounds / picking unavailable.
+    bool PickAt(uint32_t x, uint32_t y, PickHit& out);
+
+    /// Async pick from any thread: the next Render() draws the ID pass and
+    /// copies the texel; CollectPick() (each Tick) finishes the readback.
+    void RequestPick(uint32_t x, uint32_t y);
+    void CollectPick();
+    /// Latest finished async pick not yet taken (any thread).
+    bool TakePickResult(PickHit& out);
+
+    /// Highlight every mesh of `owner` with sourceFormID == formID
+    /// (0xFFFFFFFF = all of owner's meshes). Replaces an existing entry for the
+    /// same owner + formID. False when the table is full.
+    bool SetHighlight(const void* owner, uint32_t formID, const Color& color, uint32_t mode, uint32_t width);
+    /// Remove one entry (formID 0xFFFFFFFF = every entry of owner).
+    void ClearHighlight(const void* owner, uint32_t formID);
+
+private:
+    // Draw the ID pass for the current meshes (caller holds mutex_, b0 set).
+    bool DrawPickIds(const std::vector<uint8_t>& slots);
+    // Highlight slot per loaded mesh (empty when there are no highlights).
+    std::vector<uint8_t> BuildHighlightSlots() const;
+    // Render() hook: ID pass + highlight composite + async pick copy.
+    void RenderPickingPasses();
+    PickHit DescribePick(uint32_t id, uint32_t x, uint32_t y) const;
+
+    struct HighlightEntry {
+        const void* owner = nullptr;
+        uint32_t formID = 0;
+        PickRenderer::Highlight style;
+    };
+    struct PickingState {
+        PickRenderer renderer;
+        std::vector<HighlightEntry> highlights;    // guarded by RenderScene::mutex_
+        std::mutex requestMutex;                    // async request / result (any thread)
+        bool requestPending = false;
+        uint32_t requestX = 0, requestY = 0;
+        bool copyInFlight = false;                  // texel copied, not read yet
+        uint32_t copyX = 0, copyY = 0;
+        std::vector<PickHit> copySnapshot;          // meshes as drawn by that ID pass
+        bool resultReady = false;
+        PickHit result;
+    };
+    std::unique_ptr<PickingState> picking_;
+
 private:
     // Scene graph management
     void UpdateLightNodes();
@@ -269,6 +360,7 @@ private:
     ShaderPipeline shader_;
     CameraController camera_;
     std::unique_ptr<MeshRenderer> meshRenderer_;
+    std::unique_ptr<SceneLook> sceneLook_;
 
     // Scene graph
     RE::NiPointer<RE::NiNode> sceneRoot_;

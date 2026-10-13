@@ -3,8 +3,11 @@
 #include "SkyrimRenderer/Types.h"
 #include "SkyrimRenderer/ShaderPipeline.h"
 #include "SkyrimRenderer/AnimationTypes.h"
+#include "SkyrimRenderer/EffectShaderPass.h"
 
 #include <d3d11.h>
+#include <functional>
+#include <memory>
 #include <vector>
 
 namespace SkyrimRenderer {
@@ -37,8 +40,35 @@ public:
     /// is active; everything else keeps the native shader.
     void SetUseCommunityShaders(bool enabled) { useCommunityShaders_ = enabled; }
 
+    /// Per-draw hook for extra passes (shadow map, AO prepass, debug views).
+    /// Runs before each native draw, after the mesh's VS, constants, textures,
+    /// raster state and buffers are bound; it may rebind shaders and states.
+    /// Returning false skips the mesh. With bypassCommunityShaders every mesh
+    /// takes the native path; otherwise the hook only sees native draws.
+    struct DrawHook {
+        std::function<bool(ID3D11DeviceContext*, const LoadedMesh&, bool gpuSkinned)> beforeDraw;
+        bool bypassCommunityShaders = true;
+    };
+    void SetDrawHook(DrawHook hook) { drawHook_ = std::move(hook); }
+    void ClearDrawHook() { drawHook_ = {}; }
+
+    /// Effect-shader shapes (BSEffectShaderProperty glows, flames, auras):
+    /// drawn unlit after the blended pass when enabled (default on).
+    void SetEffectShadersEnabled(bool enabled) { effectShadersEnabled_ = enabled; }
+    bool EffectShadersEnabled() const { return effectShadersEnabled_; }
+
+    /// Multiplies every emissive contribution: lit materials' own emittance and
+    /// glow / PBR emissive maps, and effect-shader colour. Default 1; 0 turns
+    /// emission off.
+    void SetEmissiveScale(float scale) { emissiveScale_ = scale > 0.0f ? scale : 0.0f; }
+    float EmissiveScale() const { return emissiveScale_; }
+
 private:
     void DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& mesh);
+
+    /// Effect pass: every isEffect mesh, unlit, depth read-only.
+    void DrawEffectMeshes(ID3D11DeviceContext* ctx, const std::vector<LoadedMesh>& meshes,
+                          ID3D11DepthStencilState* depthReadOnly, UINT stencilRef);
 
     /// Build and upload the bone palette for a GPU-skinned mesh.
     void UpdateBonePaletteForMesh(ID3D11DeviceContext* ctx, const LoadedMesh& mesh);
@@ -52,6 +82,12 @@ private:
     UINT stencilRef_ = 0;
     bool hasStencilOverride_ = false;
     bool useCommunityShaders_ = false;
+    DrawHook drawHook_;
+
+
+    bool effectShadersEnabled_ = true;
+    float emissiveScale_ = 1.0f;
+    std::unique_ptr<EffectShaderPass> effectPass_;  // created on the first effect mesh
 };
 
 } // namespace SkyrimRenderer

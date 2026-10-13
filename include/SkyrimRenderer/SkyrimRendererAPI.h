@@ -123,7 +123,13 @@ extern "C" {
 //       vertex prep in parallel), GetLastRenderStats, Set/GetToneMapping
 //       (vanilla-style Reinhard tone mapping, on by default from 1.8.0);
 //       driven-head arrays may be written from any thread (see API v4).
-#define SKYRIMRENDERER_API_VERSION 9
+//  10 - build 1.9.0: export (turntables, animation strips, item previews,
+//       scaled PNG), scene look (ground shadow, self-shadow, SSAO, debug
+//       views), live mirror (actor from a reference, pose / face / equipment
+//       mirroring, expression morphs, face cam), held weapons, picking and
+//       highlight, materials (TruePBR, glow / emissive, effect shaders).
+//       Refraction shapes are no longer drawn.
+#define SKYRIMRENDERER_API_VERSION 10
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -556,8 +562,10 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_
 // rest + offset, normals, the GPU vertex image), and the immediate context is
 // saved and restored once around all the draws. Uploads and draws stay on the
 // calling thread, in list order. Duplicate handles render once.
-// Returns a Result: 0 when every scene rendered; otherwise the first failure
-// (an invalid handle is skipped and reported as InvalidHandle, 9 = DeviceLost).
+// Returns a Result: 0 when every scene rendered; otherwise the failure of the
+// first failing entry in list order. Every valid scene still renders; an
+// invalid handle is skipped and counts as InvalidHandle at its position
+// (9 = DeviceLost).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count);
 
 // Timings of a scene's last render, from any render path (RenderToTexture,
@@ -594,5 +602,523 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float expo
 
 // Any out pointer may be NULL. Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
+
+// ---- Export (API 10) ----
+// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+//
+// Paths are UTF-8. Parent directories are created. Exports render into their
+// own temporary render targets: the scene's size, texture (GetSceneTexture
+// pointers stay valid), camera and actor pose are what they were before, and
+// nothing of an export is ever composited or shown. Pixels are what ExportPNG
+// writes (sRGB-encoded RGBA; set the background alpha to 0 for a transparent
+// background). PNGs here are compressed (WIC), unlike ExportPNG's.
+
+// --- Multi-frame exports: turntables and animation strips ---
+//
+// A job renders framesPerTick frames (default 1) per Tick on the thread that
+// drives the scene's consumer: the Present hook, or the consumer's own
+// SkyrimRenderer_Tick (texture mode). Nothing happens without one of them.
+// The live camera (and clip time) is put back right after each tick's
+// frames, so the live preview keeps rendering as usual; readback is
+// pipelined (no GPU stall) and encoding runs on a worker thread. Every frame
+// uses the camera as it was when the job started; only the yaw (and / or the
+// clip time) is stepped. Destroying the scene (or the stepped actor) fails the
+// job at its next tick.
+//
+// Completion: the calling mod's ExportComplete callback (on the Tick thread,
+// once per job: done, failed or cancelled), and GetExportStatus at any time.
+// Statuses are kept until ReleaseExport (or, past the 64 most recent finished
+// jobs, dropped oldest first). Shutdown drops the caller's jobs.
+
+#define SKYRIMRENDERER_EXPORT_SHEET   0   // one sprite-sheet PNG (grid) + <name>.json with frame rects
+#define SKYRIMRENDERER_EXPORT_FRAMES  1   // numbered PNGs: <name>_000.png, <name>_001.png, ...
+#define SKYRIMRENDERER_EXPORT_APNG    2   // animated PNG (full colour + alpha)
+#define SKYRIMRENDERER_EXPORT_GIF     3   // animated GIF (256 colours per frame, 1-bit alpha)
+
+// Export flags
+#define SKYRIMRENDERER_EXPORT_STEP_YAW      0x1u   // step the camera yaw from startYaw to endYaw
+#define SKYRIMRENDERER_EXPORT_STEP_TIME     0x2u   // step the actor's clip from startTime to endTime
+// Frame i of n sits at start + (end - start) * i / n, so the sequence loops
+// (the last frame is one step short of the end). With INCLUSIVE_END it is
+// i / (n - 1) and the last frame lands on the end. startYaw == endYaw means a
+// full turn (startYaw .. startYaw + 360) and is always looping.
+#define SKYRIMRENDERER_EXPORT_INCLUSIVE_END 0x4u
+
+// Job states (SkyrimRenderer_ExportStatus::state, callback)
+#define SKYRIMRENDERER_EXPORT_STATE_UNKNOWN   0   // no such job (never was, released or dropped)
+#define SKYRIMRENDERER_EXPORT_STATE_RENDERING 1
+#define SKYRIMRENDERER_EXPORT_STATE_WRITING   2   // all frames rendered, file being written
+#define SKYRIMRENDERER_EXPORT_STATE_DONE      3
+#define SKYRIMRENDERER_EXPORT_STATE_FAILED    4   // see result
+#define SKYRIMRENDERER_EXPORT_STATE_CANCELLED 5
+
+struct SkyrimRenderer_ExportFramesDesc {
+    uint32_t    structSize;     // in: sizeof(SkyrimRenderer_ExportFramesDesc)
+    uint32_t    scene;
+    uint32_t    actor;          // STEP_TIME: actor preview whose loaded clip is stepped (SeekAnimation)
+    uint32_t    format;         // SKYRIMRENDERER_EXPORT_SHEET / FRAMES / APNG / GIF
+    uint32_t    flags;          // SKYRIMRENDERER_EXPORT_STEP_YAW and / or STEP_TIME, INCLUSIVE_END
+    uint32_t    frameCount;     // 1..1024
+    float       startYaw;       // degrees, as SetCamera
+    float       endYaw;
+    float       startTime;      // seconds into the clip
+    float       endTime;        // <= startTime: the clip's end
+    uint32_t    width;          // frame size; 0 = the scene's (1..4096)
+    uint32_t    height;
+    uint32_t    frameDelayMs;   // APNG / GIF; 0 = clip time per frame (STEP_TIME) or 50 ms (GIF: 10 ms units, >= 20)
+    uint32_t    loopCount;      // APNG / GIF; 0 = forever
+    uint32_t    columns;        // sheet; 0 = ceil(sqrt(frameCount)). Sheet <= 32768 px a side, 2^28 px
+    uint32_t    framesPerTick;  // 0 = 1; at most 7
+    const char* outPath;        // UTF-8: sheet / APNG / GIF file, or the FRAMES name pattern base
+};
+
+// Called on the Tick thread when a job ends. outPath is the job's path (UTF-8),
+// valid for the call only. result is a Result code (0 when state is DONE).
+typedef void (*SkyrimRenderer_ExportCallback)(
+    uint32_t job, uint32_t scene, uint32_t state, uint32_t result, const char* outPath);
+
+struct SkyrimRenderer_ExportStatus {
+    uint32_t structSize;        // in: sizeof(SkyrimRenderer_ExportStatus)
+    uint32_t state;             // SKYRIMRENDERER_EXPORT_STATE_*
+    uint32_t result;            // Result code once finished (0 = success)
+    uint32_t scene;
+    uint32_t framesRendered;    // rendered and read back
+    uint32_t framesWritten;     // encoded by the writer thread
+    uint32_t frameCount;
+};
+
+// Start a multi-frame export. Returns a job id, 0 when refused (bad scene,
+// parameters, no clip for STEP_TIME, sizes over the caps; see the log).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportFrames(const SkyrimRenderer_ExportFramesDesc* desc);
+
+// Turntable: frameCount frames with the camera yaw stepped from startYaw to
+// endYaw (equal: one full 360 turn), at the scene's size. flags:
+// SKYRIMRENDERER_EXPORT_INCLUSIVE_END or 0. Returns a job id, 0 when refused.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportTurntable(
+    uint32_t scene, uint32_t frameCount, float startYaw, float endYaw,
+    uint32_t format, const char* outPath, uint32_t flags);
+
+// Animation strip: frameCount frames of `actor`'s loaded clip from startTime
+// to endTime (endTime <= startTime: to the clip's end), camera fixed, at the
+// scene's size. The actor is left at the clip time it had (playing clips keep
+// playing). flags: SKYRIMRENDERER_EXPORT_INCLUSIVE_END or 0, plus
+// SKYRIMRENDERER_EXPORT_STEP_YAW for a full turn while it plays. Returns a job
+// id, 0 when refused.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportAnimationFrames(
+    uint32_t scene, uint32_t actor, uint32_t frameCount, float startTime, float endTime,
+    uint32_t format, const char* outPath, uint32_t flags);
+
+// Fill out (out->structSize must be set). Returns 1, or 0 for an unknown job
+// (state UNKNOWN) or a too-small struct.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetExportStatus(uint32_t job, SkyrimRenderer_ExportStatus* out);
+
+// Stop a running job (state CANCELLED; the callback still runs). Partial
+// files may be left behind.
+SKYRIMRENDERER_API void SkyrimRenderer_CancelExport(uint32_t job);
+
+// Forget a job's status; a running job is cancelled without a callback.
+SKYRIMRENDERER_API void SkyrimRenderer_ReleaseExport(uint32_t job);
+
+// Set/clear the calling mod's export-complete callback (NULL clears).
+SKYRIMRENDERER_API void SkyrimRenderer_SetExportCompleteCallback(SkyrimRenderer_ExportCallback callback);
+
+// --- High-res stills ---
+
+// Render the scene once at `scale` x its size and write a compressed PNG.
+// Up to 4096 px a side renders in one temporary target; beyond that in 4096
+// px tiles, each an off-centre slice of the full frame's projection, stitched
+// on the CPU (screen-space post-process passes then run per tile). Output is
+// capped at 32768 px a side and 2^28 pixels: scale is lowered to fit.
+// Synchronous, render thread only (like RenderToTexture); large scales take
+// a while. Returns a Result.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_ExportPNGScaled(uint32_t scene, const char* filePath, float scale);
+
+// --- Item icons ---
+
+#define SKYRIMRENDERER_ITEM_FEMALE          0x1u   // armor: the female model (falls back to male)
+#define SKYRIMRENDERER_ITEM_GROUND_MODEL    0x2u   // armor: the ARMO ground / inventory model, not the worn ARMA
+#define SKYRIMRENDERER_ITEM_APPEND          0x4u   // keep the scene's meshes (default: replace them)
+#define SKYRIMRENDERER_ITEM_KEEP_CAMERA     0x8u   // do not frame
+#define SKYRIMRENDERER_ITEM_KEEP_BACKGROUND 0x10u  // keep the background (default: transparent black)
+
+// Load one item's model alone into a scene (no actor, no body) for icons and
+// catalogue thumbnails, and frame it: a 3/4 view from above with the bounds
+// fitted to the frame (10% margin). formID: an armor (its worn ARMA model for
+// the player's race, else the armor's race; GROUND_MODEL for the ARMO world
+// model; each falls back to the other), an ARMA, a weapon, ammo, misc item,
+// or any other form with a model; a reference uses its base object.
+// Replaces the scene's meshes (use a scene without actor previews), and sets
+// the background to (0, 0, 0, 0) and the FOV to 50 (narrower for very small
+// items) unless the flags say otherwise. Texture swaps (alternate textures)
+// are not applied. Returns the number of shapes loaded, 0 on failure.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint32_t formID, uint32_t flags);
+
+// ---- Scene look (API 10) ----
+// Ground contact shadow, key light self-shadowing, SSAO and debug views, per
+// scene. All off by default; off leaves the output identical to API 9. They
+// apply to the built-in preview shaders: meshes drawn by the Community
+// Shaders path get no self-shadow / AO, and debug views draw every mesh with
+// the built-in shaders. Settings take effect on the next render; any thread.
+
+// Ground shadow modes
+#define SKYRIMRENDERER_GROUND_SHADOW_OFF   0u
+#define SKYRIMRENDERER_GROUND_SHADOW_MAP   1u  // key light shadow map on an invisible floor at the feet
+#define SKYRIMRENDERER_GROUND_SHADOW_BLOB  2u  // soft ellipse under the actor (cheaper)
+
+// Darkens an invisible floor plane at the lowest point of the loaded meshes,
+// in the key light's (strongest light's) direction, raised to at least 15
+// degrees elevation. Composited as "black over" the background: an opaque
+// background is darkened, a transparent one gets the shadow as alpha (in
+// texture mode, premultiplied like the rest of the image), so consumers can
+// composite it. Not drawn for head-only content (meshes under 60 units tall)
+// or when the camera is below the floor.
+//   opacity:  0..1 darkness at full occlusion (default 0.6)
+//   softness: 0..1 penumbra width; the map mode keeps contact points sharp
+//             and softens with distance from the feet (default 0.5)
+SKYRIMRENDERER_API void SkyrimRenderer_SetGroundShadow(uint32_t scene, uint32_t mode, float opacity, float softness);
+
+// Key light self-shadowing on the actor from the same 1024x1024 shadow map
+// (PCF). strength: 0..1, how much of the key light a shadowed pixel loses
+// (default 0.85). Ambient and the other lights are unaffected.
+SKYRIMRENDERER_API void SkyrimRenderer_SetSelfShadow(uint32_t scene, int32_t enabled, float strength);
+
+// Screen-space ambient occlusion (own depth + normal prepass, full
+// resolution, blurred), applied before tone mapping: fully on the ambient
+// term, partly on direct light.
+//   radius:    world units (<= 0: default 5; an adult actor is ~128 tall;
+//              2-3 suits face close-ups)
+//   intensity: 0..4 (default 1)
+SKYRIMRENDERER_API void SkyrimRenderer_SetAmbientOcclusion(uint32_t scene, int32_t enabled, float radius, float intensity);
+
+// Debug views
+#define SKYRIMRENDERER_DEBUG_VIEW_NONE           0u
+#define SKYRIMRENDERER_DEBUG_VIEW_NORMALS        1u  // world shading normal (normal maps applied), n * 0.5 + 0.5
+#define SKYRIMRENDERER_DEBUG_VIEW_UVS            2u  // frac(uv) as red / green, 8x8 checker
+#define SKYRIMRENDERER_DEBUG_VIEW_VERTEX_COLORS  3u  // vertex colour RGB
+#define SKYRIMRENDERER_DEBUG_VIEW_SKIN_WEIGHTS   4u  // bones per vertex (1 blue .. 4 red; grey = unskinned),
+                                                    // or the DebugViewBone weight as a heat map
+#define SKYRIMRENDERER_DEBUG_VIEW_WIREFRAME      5u  // normal render + wireframe overlay
+#define SKYRIMRENDERER_DEBUG_VIEW_MIP_LEVEL      6u  // diffuse mip: green 1:1, blue magnified, yellow..red minified
+#define SKYRIMRENDERER_DEBUG_VIEW_ALBEDO         7u  // composed albedo (tints applied), no lighting
+#define SKYRIMRENDERER_DEBUG_VIEW_LIGHTING       8u  // lighting on white albedo, tone mapped (incl. self-shadow / AO)
+
+// Views other than WIREFRAME write opaque pixels (alpha-tested meshes) over
+// the background and skip the ground shadow (LIGHTING keeps it). Unknown
+// modes are NONE.
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugView(uint32_t scene, uint32_t mode);
+
+// Bone for SKIN_WEIGHTS (NIF bone name, case-insensitive, e.g. "NPC Head [Head]").
+// NULL or "" shows the influence count instead.
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugViewBone(uint32_t scene, const char* boneName);
+
+struct SkyrimRenderer_SceneLookState {
+    uint32_t structSize;          // in: sizeof(SkyrimRenderer_SceneLookState)
+    uint32_t groundShadowMode;    // SKYRIMRENDERER_GROUND_SHADOW_*
+    float    groundShadowOpacity;
+    float    groundShadowSoftness;
+    int32_t  selfShadow;
+    float    selfShadowStrength;
+    int32_t  ambientOcclusion;
+    float    aoRadius;
+    float    aoIntensity;
+    uint32_t debugView;           // SKYRIMRENDERER_DEBUG_VIEW_*
+    char     debugViewBone[128];
+};
+
+// Fill out (out->structSize must be set). Returns 1, or 0 for an unknown
+// scene or a too-small struct.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out);
+
+// ---- Live mirror (API 10) ----
+// (gate on SkyrimRenderer_GetAPIVersion() >= 10)
+//
+// Read a live in-game actor (the player or any loaded NPC) and recreate it in
+// a preview, then keep the preview in step with it every frame: skeleton pose
+// (head nods, idles, gestures), facial expression and worn armor. The use case
+// is a picture-in-picture "face cam": in first person the player cannot see
+// their own head gestures or expressions, the preview can. See
+// docs/LiveMirror.md for the design and the first-person caveats.
+//
+// Threading: every call here is game main thread only (they read live game
+// objects). The mirror itself runs in SceneManager's per-frame work: the
+// Present hook, or SkyrimRenderer_Tick for texture-mode consumers. A mirrored
+// scene that is composited (SetCompositeRect) or in texture mode is re-rendered
+// by the mirror whenever the live actor changed; other scenes are not.
+//
+// Expressions (SetFaceMorph & co.) work on any actor preview, live or not:
+// they add the head parts' expression tri morphs ("Morphs" tri,
+// HeadShapeInfo.triMorph) on top of the head's positions, as the engine does.
+
+// Mirror flags (SetLiveMirror, LoadActorFromReference, CreateLiveFaceCam).
+#define SKYRIMRENDERER_MIRROR_POSE           0x01u  // copy the live third-person skeleton every frame
+#define SKYRIMRENDERER_MIRROR_FACE           0x02u  // live expression / modifier / phoneme values -> tri morphs
+#define SKYRIMRENDERER_MIRROR_EQUIPMENT      0x04u  // rebuild when the live worn armor changes (debounced)
+#define SKYRIMRENDERER_MIRROR_FACE_VERTICES  0x08u  // player only: copy the live face vertices (30 Hz) for the
+                                                    // face meshes bound to them (RefreshLiveFace path); with
+                                                    // FACE too, tri morphs drive the other head parts
+#define SKYRIMRENDERER_MIRROR_PIN_NECK       0x10u  // keep the neck at its bind-pose position (translation
+                                                    // only) so walking, sitting or sneaking stays in frame
+#define SKYRIMRENDERER_MIRROR_LIVE_SCALE     0x20u  // take bone scales from the live skeleton too (default:
+                                                    // the skeleton NIF's; head-hiding first-person mods
+                                                    // scale the live head to zero)
+#define SKYRIMRENDERER_MIRROR_DEFAULT \
+    (SKYRIMRENDERER_MIRROR_POSE | SKYRIMRENDERER_MIRROR_FACE | SKYRIMRENDERER_MIRROR_EQUIPMENT | SKYRIMRENDERER_MIRROR_PIN_NECK)
+
+// Face morph groups (SetFaceMorph): the engine's BSFaceGenKeyframe slots.
+//   EXPRESSION (17): 0 DialogueAnger 1 DialogueFear 2 DialogueHappy 3 DialogueSad
+//     4 DialogueSurprise 5 DialoguePuzzled 6 DialogueDisgusted 7 MoodNeutral
+//     8 MoodAnger 9 MoodFear 10 MoodHappy 11 MoodSad 12 MoodSurprise
+//     13 MoodPuzzled 14 MoodDisgusted 15 CombatAnger 16 CombatShout
+//   MODIFIER (17): 0 BlinkLeft 1 BlinkRight 2 BrowDownLeft 3 BrowDownRight
+//     4 BrowInLeft 5 BrowInRight 6 BrowUpLeft 7 BrowUpRight 8 LookDown 9 LookLeft
+//     10 LookRight 11 LookUp 12 SquintLeft 13 SquintRight 14 HeadPitch
+//     15 HeadRoll 16 HeadYaw
+//   PHONEME (16): 0 Aah 1 BigAah 2 BMP 3 ChJSh 4 DST 5 Eee 6 Eh 7 FV 8 I 9 K
+//     10 N 11 Oh 12 OohQ 13 R 14 Th 15 W
+//   CUSTOM (1): 0 SkinnyMorph
+// A slot drives the tri morph of the same name in every head part that has
+// one (HeadPitch / HeadRoll / HeadYaw and MoodNeutral usually have none).
+// Weights are 0..1 like the engine's (MFG console values / 100).
+#define SKYRIMRENDERER_FACE_EXPRESSION 0u
+#define SKYRIMRENDERER_FACE_MODIFIER   1u
+#define SKYRIMRENDERER_FACE_PHONEME    2u
+#define SKYRIMRENDERER_FACE_CUSTOM     3u
+
+// CreateLiveFaceCam flags, on top of the SKYRIMRENDERER_MIRROR_* bits.
+#define SKYRIMRENDERER_FACECAM_TEXTURE_MODE  0x00010000u  // texture-mode scene, no composite rect / Present hook
+#define SKYRIMRENDERER_FACECAM_FACE_CLOSE    0x00020000u  // camera preset FaceClose (default HeadShot)
+#define SKYRIMRENDERER_FACECAM_UPPER_BODY    0x00040000u  // camera preset UpperBody
+
+struct SkyrimRenderer_LiveMirrorStatus {
+    uint32_t structSize;              // in: sizeof(SkyrimRenderer_LiveMirrorStatus)
+    uint32_t refFormID;               // mirrored reference, 0 when no mirror
+    uint32_t flags;                   // SKYRIMRENDERER_MIRROR_*
+    int32_t  liveLoaded;              // the reference's third-person 3D is loaded
+    int32_t  firstPerson;             // the reference is the player and the camera is first person
+    uint32_t boundBones;              // live nodes copied onto preview bones
+    uint32_t derivedBones;            // preview bones following a mirrored parent (no live node)
+    uint32_t faceMorphMeshes;         // head meshes driven by tri morphs
+    uint32_t liveFaceMeshes;          // head meshes fed live vertices (FACE_VERTICES)
+    int32_t  faceSourceFound;         // the live actor has face animation data
+    uint32_t frames;                  // mirror updates so far
+    uint32_t poseChanges;             // updates in which a mirrored bone moved
+    uint32_t faceChanges;             // updates in which a face value or vertex changed
+    uint32_t equipmentRebuilds;
+    float    secondsSincePoseChange;  // -1 before the first change
+    float    secondsSinceFaceChange;  // -1 before the first change
+};
+
+// Load a preview of a live actor reference (the player 0x14 or a loaded NPC;
+// an unloaded one falls back to its base NPC like LoadActorPreview): race,
+// sex, weight, the third-person worn armor, skin / hair colours and tint
+// masks, the player's live face or the NPC's FaceGen head and head parts.
+// When the reference's 3D is loaded the preview also takes its current pose
+// and expression once, then keeps mirroring with `mirrorFlags`
+// (SKYRIMRENDERER_MIRROR_*; 0 = a still snapshot). Body morphs (RaceMenu /
+// OBody) are not readable here: pass them with SetActorMorphs. Returns the
+// actor handle (DestroyActorPreview frees it), 0 on failure.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorFromReference(uint32_t scene, uint32_t refFormID,
+                                                                   uint32_t mirrorFlags);
+
+// Start, change or stop (flags 0) mirroring a live reference onto any full
+// actor preview (head previews take FACE only). POSE replaces the preview's
+// animation (the clip is dropped). Returns 1, 0 for an unknown actor or a
+// reference that is not an actor.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetLiveMirror(uint32_t actor, uint32_t refFormID, uint32_t flags);
+
+// Fill out (out->structSize must be set). Returns 1, 0 for an unknown actor or
+// a too-small struct; an actor without a mirror reports refFormID 0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetLiveMirrorStatus(uint32_t actor, SkyrimRenderer_LiveMirrorStatus* out);
+
+// Set one face morph weight (group SKYRIMRENDERER_FACE_*, index per the table
+// above) on an actor or head preview. Applied on the scene's next render. A
+// live FACE mirror overwrites the slots it reads every frame. Returns 1 when
+// the actor has at least one head mesh with expression morphs, else 0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetFaceMorph(uint32_t actor, uint32_t group, uint32_t index, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetExpression(uint32_t actor, uint32_t expression, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetModifier(uint32_t actor, uint32_t modifier, float weight);
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetPhoneme(uint32_t actor, uint32_t phoneme, float weight);
+
+// Zero every face morph weight.
+SKYRIMRENDERER_API void SkyrimRenderer_ResetFaceMorphs(uint32_t actor);
+
+// Face cam: a scene of width x height pixels with the live reference loaded
+// (LoadActorFromReference with mirrorFlags = flags' SKYRIMRENDERER_MIRROR_*
+// bits, SKYRIMRENDERER_MIRROR_DEFAULT when they are 0), framed HeadShot
+// (or FACECAM_FACE_CLOSE / FACECAM_UPPER_BODY), Portrait lighting, and shown
+// as a screen window at (x, y): the scene's composite rect, which installs
+// the Present hook for the calling mod if it is not installed yet. Move or
+// hide the window with SetCompositeRect / ClearCompositeRect; frame it with
+// AddOverlay + AttachOverlayToScene. With FACECAM_TEXTURE_MODE the scene is a
+// texture-mode scene instead (no rect, no hook; sample GetSceneTexture and
+// call Tick once per frame). The preview is independent of the live actor:
+// nothing on the live actor is hidden or changed, in first person or not.
+// Returns 1 and the handles (either out pointer may be NULL), 0 on failure.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_CreateLiveFaceCam(uint32_t refFormID, float x, float y,
+                                                            float width, float height, uint32_t flags,
+                                                            uint32_t* out_scene, uint32_t* out_actor);
+
+// Destroy a face cam's scene, its actor and its mirror (DestroyScene).
+SKYRIMRENDERER_API void SkyrimRenderer_DestroyLiveFaceCam(uint32_t scene);
+
+// ---- Equipment & picking (API 10) ----
+//
+// Held items: weapons (WEAP: swords, daggers, axes, maces, two-handers, bows,
+// crossbows, staffs), torches (LIGH), ammo (AMMO: the quiver model) and
+// shields (ARMO with the shield slot, 39). The 3rd-person world model is used.
+// Weapons, torches and ammo hang rigidly from a skeleton node and follow the
+// pose and animation:
+//   drawn     right hand -> "WEAPON", left hand -> "SHIELD" (bows are held in
+//             the left hand: "SHIELD"; crossbows in the right: "WEAPON")
+//   sheathed  "WeaponSword" / "WeaponDagger" / "WeaponAxe" / "WeaponMace" /
+//             "WeaponBack" (two-handers) / "WeaponBow" / "WeaponStaff" /
+//             "WeaponCrossBow"; left-hand weapons try the "...Left" nodes
+//             (XP32-style skeletons) first. Missing nodes fall back to the
+//             nearest vanilla node, then the hand or pelvis bone.
+//   scabbard  shapes under the weapon NIF's "Scb" node stay on the sheath
+//             node while the weapon is drawn, as in game.
+//   torch     "SHIELD" (left hand), drawn or not.  ammo  "QUIVER" ("BOLT"
+//             first for bolts).
+// Shields are armor: skinned to "SHIELD" like any armor addon and listed by
+// GetEquippedItems; EquipWeapon replaces the armor in the shield slot.
+// A two-handed weapon (two-handed sword/axe, bow, crossbow) takes both hands.
+// Held items survive EquipOutfit / RebuildWithCurrentOutfit. EquipItem and
+// EquipOutfit also accept WEAP / LIGH / AMMO FormIDs: EquipItem puts them in
+// the right hand (torches left) in the current drawn state; EquipOutfit with
+// replaceAll and any held-item FormIDs in the list replaces the held items.
+// Head previews (LoadActorHead) refuse all of this.
+
+#define SKYRIMRENDERER_HAND_RIGHT 0u
+#define SKYRIMRENDERER_HAND_LEFT  1u
+
+// Equip a held item. hand: SKYRIMRENDERER_HAND_* (ignored for torches, ammo,
+// shields and two-handed weapons). drawn: 1 = in hand, 0 = sheathed; applies
+// to every held weapon of the actor (they are drawn or sheathed together).
+// Returns a Result (0 = success, 6 = InvalidParameter for other form types or
+// an unknown hand value).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(
+    uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn);
+
+// Remove a held item (or a shield). formID 0 removes every held item (not the
+// shield). Returns a Result.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_UnequipWeapon(uint32_t actor, uint32_t formID);
+
+// Draw (1) or sheathe (0) every held weapon. Cheap: no reload.
+SKYRIMRENDERER_API void SkyrimRenderer_SetWeaponsDrawn(uint32_t actor, int32_t drawn);
+
+// Held items (weapons, torch, ammo; not shields). Writes up to maxCount
+// FormIDs and, when out_hands is not NULL, each item's hand
+// (SKYRIMRENDERER_HAND_*, 2 = both, 3 = none for ammo). Returns the count written.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeldItems(
+    uint32_t actor, uint32_t* out_formIDs, uint32_t* out_hands, uint32_t maxCount);
+
+// --- Picking ----------------------------------------------------------------
+//
+// Which mesh is under a pixel of the scene's render target (x, y in
+// render-target pixels, origin top-left, as GetSceneTexture / ReadbackPixels
+// see them). An ID pass (R32_UINT, its own depth, never multisampled) draws
+// the scene's meshes with the current camera and pose, honouring alpha-test
+// cutouts (blended hair counts where its alpha is >= 0.5); one texel is read
+// back. Nothing is drawn or allocated until the first pick or highlight.
+
+// What the hit mesh belongs to (SkyrimRenderer_PickResult::kind).
+#define SKYRIMRENDERER_PICK_NONE      0u  // a scene mesh (LoadMesh) or unknown
+#define SKYRIMRENDERER_PICK_BODY      1u  // skin: body, hands, feet, head / FaceGen
+#define SKYRIMRENDERER_PICK_HEADPART  2u  // a separate head part; formID = BGSHeadPart
+#define SKYRIMRENDERER_PICK_ARMOR     3u  // formID = ARMO (shields too), slotMask = its ARMA slots
+#define SKYRIMRENDERER_PICK_WEAPON    4u  // formID = WEAP
+#define SKYRIMRENDERER_PICK_TORCH     5u  // formID = LIGH
+#define SKYRIMRENDERER_PICK_AMMO      6u  // formID = AMMO
+
+// SkyrimRenderer_PickResult::flags
+#define SKYRIMRENDERER_PICKFLAG_SCABBARD 0x1u  // the weapon's scabbard
+
+struct SkyrimRenderer_PickResult {
+    uint32_t structSize;    // in: sizeof(SkyrimRenderer_PickResult)
+    int32_t  hit;           // 1 when a mesh covers the pixel
+    uint32_t x, y;          // the pixel asked for
+    uint32_t actor;         // actor handle the mesh belongs to, 0 for scene meshes
+    uint32_t formID;        // see SKYRIMRENDERER_PICK_*; 0 for body skin / scene meshes
+    uint32_t slotMask;      // biped slot bits (bit 0 = slot 30); body parts: their slot
+    uint32_t kind;          // SKYRIMRENDERER_PICK_*
+    uint32_t flags;         // SKYRIMRENDERER_PICKFLAG_*
+    uint32_t meshIndex;     // index in the scene's mesh list at pick time
+    char     shapeName[128];  // NIF shape name
+};
+
+// Synchronous pick. Renders the ID pass and waits for the one texel, so call
+// it where you would call RenderToTexture: on the thread that renders (the
+// game's main thread inside the frame, a per-frame callback, a Tick task).
+// Fills out (out->structSize must be set). Returns 1 on a hit, 0 for
+// background / bad handle / out of bounds.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_PickAt(
+    uint32_t scene, uint32_t x, uint32_t y, SkyrimRenderer_PickResult* out);
+
+// Asynchronous pick, callable from any thread (e.g. UI mouse-move handlers).
+// Queues the pixel (a newer request replaces an unfinished one) and a render
+// of the scene; the ID pass runs with that render and the texel is collected
+// on the following Tick, without a GPU stall.
+SKYRIMRENDERER_API void SkyrimRenderer_RequestPick(uint32_t scene, uint32_t x, uint32_t y);
+
+// Latest finished async pick. Returns 1 and fills out (structSize set) when a
+// result is ready that has not been returned yet, 0 otherwise.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetPickResult(uint32_t scene, SkyrimRenderer_PickResult* out);
+
+// --- Highlight --------------------------------------------------------------
+//
+// Mark an actor's item on screen. Drawn on top of the shaded scene from the
+// ID pass (after post-process, before the frame overlay), so it looks the same
+// on the native and the Community Shaders path. Only the visible part of the
+// item is marked (occluded parts are not drawn through).
+
+#define SKYRIMRENDERER_HIGHLIGHT_OUTLINE 0x1u  // outline around the item's silhouette
+#define SKYRIMRENDERER_HIGHLIGHT_TINT    0x2u  // translucent fill: color.rgb at color.a
+#define SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS 0xFFFFFFFFu  // formID: every mesh of the actor
+
+// formID: an equipped ARMO / WEAP / LIGH / AMMO / head part form, 0 for the
+// body skin, or SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS. color: 0..1 RGBA written
+// to the target as-is (alpha = opacity; NULL = amber). mode:
+// SKYRIMRENDERER_HIGHLIGHT_* bits (0 = OUTLINE). outlineWidth: pixels, 1..4
+// (0 = 2). Calling again for the same actor + formID replaces it. Up to 16
+// highlights per scene. Set / Clear queue a render of the actor's scene
+// (RequestRender). Returns 1/0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
+    uint32_t actor, uint32_t formID, const SkyrimRenderer_Color* color, uint32_t mode, uint32_t outlineWidth);
+
+// Remove a highlight (SKYRIMRENDERER_HIGHLIGHT_ALL_FORMS removes every
+// highlight of the actor).
+SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID);
+
+// ---- Materials (API 10) ----
+//
+// TruePBR meshes (Community Shaders PBR: the kMenuScreen shader flag that PBR
+// NIF patchers / ParallaxGen set) are shaded as metallic/roughness PBR from
+// their RMAOS map instead of as vanilla Blinn-Phong, and drawn by Community
+// Shaders' own TruePBR shader when the CS path is on and its cache has the
+// permutation. Refraction shapes (torch heat haze) are no longer drawn. Glow
+// maps (shader type 2) and SLSF1_OWN_EMIT materials emit. None of this needs
+// a call; the functions below are per-scene switches.
+//
+// Optional bloom: the shader folder ships PostProcess/Bloom.ps.hlsl for the
+// post-process stack, e.g. AddPostProcess(scene, "Bloom", 1,
+// "<shader dir>/PostProcess/Bloom.ps.hlsl", 100) and SetPostProcessParams
+// { threshold (0.75), intensity (0.6), radius px (8) } (<= 0 = default).
+
+// Draw BSEffectShaderProperty shapes (glow cards, flames, magic auras) unlit
+// after the lit passes: source texture x emissive colour x multiple, greyscale
+// palette, view-angle falloff, the NiAlphaProperty's blend (additive, alpha,
+// multiply), depth test on, depth write off. Shapes without a source texture
+// or without blending are never drawn. Default 1 (on); 0 hides them, as builds
+// before API 10 did. Effect shapes never move the camera presets' framing.
+SKYRIMRENDERER_API void    SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled);
+// 1/0; 0 for an unknown scene.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene);
+
+// Scale on every emissive contribution of a scene: materials' own emittance,
+// glow / PBR emissive maps and effect shapes. Default 1.0; 0 turns emission
+// and effect shapes off; negative clamps to 0.
+SKYRIMRENDERER_API void    SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale);
+// 1.0 for an unknown scene.
+SKYRIMRENDERER_API float   SkyrimRenderer_GetEmissiveScale(uint32_t scene);
 
 } // extern "C"
