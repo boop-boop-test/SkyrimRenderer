@@ -185,7 +185,8 @@ void MeshRenderer::DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& me
     // Community Shaders path: same skinning, morphs and raster state as above,
     // CS's own pixel shader and the user's CS settings.
     // Falls through to the native draw when CS can't draw it (e.g. no bridge VS).
-    if (useCommunityShaders_ && CSRenderPath::Get().Handles(mesh) &&
+    const bool hookBypassesCS = drawHook_.beforeDraw && drawHook_.bypassCommunityShaders;
+    if (useCommunityShaders_ && !hookBypassesCS && CSRenderPath::Get().Handles(mesh) &&
         CSRenderPath::Get().Draw(ctx, mesh, useGPUSkinning, shader_.GetInputLayout(useGPUSkinning),
                                  shader_.GetSamplerState())) {
         shader_.RestoreAfterForeignDraw(ctx);
@@ -216,7 +217,9 @@ void MeshRenderer::DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& me
     UINT offset = 0;
     ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
     ctx->IASetIndexBuffer(mesh.indexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
-    ctx->DrawIndexed(mesh.indexCount, 0, 0);
+    if (!drawHook_.beforeDraw || drawHook_.beforeDraw(ctx, mesh, useGPUSkinning)) {
+        ctx->DrawIndexed(mesh.indexCount, 0, 0);
+    }
 
     // Restore unskinned VS after drawing a skinned mesh
     if (useGPUSkinning) {

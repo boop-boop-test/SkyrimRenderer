@@ -5,6 +5,7 @@
 #include "SkyrimRenderer/AnimationTypes.h"
 
 #include <d3d11.h>
+#include <functional>
 #include <vector>
 
 namespace SkyrimRenderer {
@@ -37,6 +38,18 @@ public:
     /// is active; everything else keeps the native shader.
     void SetUseCommunityShaders(bool enabled) { useCommunityShaders_ = enabled; }
 
+    /// Per-draw hook for extra passes (shadow map, AO prepass, debug views).
+    /// Runs before each native draw, after the mesh's VS, constants, textures,
+    /// raster state and buffers are bound; it may rebind shaders and states.
+    /// Returning false skips the mesh. With bypassCommunityShaders every mesh
+    /// takes the native path; otherwise the hook only sees native draws.
+    struct DrawHook {
+        std::function<bool(ID3D11DeviceContext*, const LoadedMesh&, bool gpuSkinned)> beforeDraw;
+        bool bypassCommunityShaders = true;
+    };
+    void SetDrawHook(DrawHook hook) { drawHook_ = std::move(hook); }
+    void ClearDrawHook() { drawHook_ = {}; }
+
 private:
     void DrawSingleMesh(ID3D11DeviceContext* ctx, const LoadedMesh& mesh);
 
@@ -52,6 +65,7 @@ private:
     UINT stencilRef_ = 0;
     bool hasStencilOverride_ = false;
     bool useCommunityShaders_ = false;
+    DrawHook drawHook_;
 };
 
 } // namespace SkyrimRenderer

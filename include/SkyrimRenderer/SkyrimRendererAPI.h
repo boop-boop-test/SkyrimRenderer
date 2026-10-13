@@ -595,4 +595,80 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float expo
 // Any out pointer may be NULL. Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
 
+// ---- Scene look (API 10) ----
+// Ground contact shadow, key light self-shadowing, SSAO and debug views, per
+// scene. All off by default; off leaves the output identical to API 9. They
+// apply to the built-in preview shaders: meshes drawn by the Community
+// Shaders path get no self-shadow / AO, and debug views draw every mesh with
+// the built-in shaders. Settings take effect on the next render; any thread.
+
+// Ground shadow modes
+#define SKYRIMRENDERER_GROUND_SHADOW_OFF   0u
+#define SKYRIMRENDERER_GROUND_SHADOW_MAP   1u  // key light shadow map on an invisible floor at the feet
+#define SKYRIMRENDERER_GROUND_SHADOW_BLOB  2u  // soft ellipse under the actor (cheaper)
+
+// Darkens an invisible floor plane at the lowest point of the loaded meshes,
+// in the key light's (strongest light's) direction, raised to at least 15
+// degrees elevation. Composited as "black over" the background: an opaque
+// background is darkened, a transparent one gets the shadow as alpha (in
+// texture mode, premultiplied like the rest of the image), so consumers can
+// composite it. Not drawn for head-only content (meshes under 60 units tall)
+// or when the camera is below the floor.
+//   opacity:  0..1 darkness at full occlusion (default 0.6)
+//   softness: 0..1 penumbra width; the map mode keeps contact points sharp
+//             and softens with distance from the feet (default 0.5)
+SKYRIMRENDERER_API void SkyrimRenderer_SetGroundShadow(uint32_t scene, uint32_t mode, float opacity, float softness);
+
+// Key light self-shadowing on the actor from the same 1024x1024 shadow map
+// (PCF). strength: 0..1, how much of the key light a shadowed pixel loses
+// (default 0.85). Ambient and the other lights are unaffected.
+SKYRIMRENDERER_API void SkyrimRenderer_SetSelfShadow(uint32_t scene, int32_t enabled, float strength);
+
+// Screen-space ambient occlusion (own depth + normal prepass, full
+// resolution, blurred), applied before tone mapping: fully on the ambient
+// term, partly on direct light.
+//   radius:    world units (<= 0: default 5; an adult actor is ~128 tall;
+//              2-3 suits face close-ups)
+//   intensity: 0..4 (default 1)
+SKYRIMRENDERER_API void SkyrimRenderer_SetAmbientOcclusion(uint32_t scene, int32_t enabled, float radius, float intensity);
+
+// Debug views
+#define SKYRIMRENDERER_DEBUG_VIEW_NONE           0u
+#define SKYRIMRENDERER_DEBUG_VIEW_NORMALS        1u  // world shading normal (normal maps applied), n * 0.5 + 0.5
+#define SKYRIMRENDERER_DEBUG_VIEW_UVS            2u  // frac(uv) as red / green, 8x8 checker
+#define SKYRIMRENDERER_DEBUG_VIEW_VERTEX_COLORS  3u  // vertex colour RGB
+#define SKYRIMRENDERER_DEBUG_VIEW_SKIN_WEIGHTS   4u  // bones per vertex (1 blue .. 4 red; grey = unskinned),
+                                                    // or the DebugViewBone weight as a heat map
+#define SKYRIMRENDERER_DEBUG_VIEW_WIREFRAME      5u  // normal render + wireframe overlay
+#define SKYRIMRENDERER_DEBUG_VIEW_MIP_LEVEL      6u  // diffuse mip: green 1:1, blue magnified, yellow..red minified
+#define SKYRIMRENDERER_DEBUG_VIEW_ALBEDO         7u  // composed albedo (tints applied), no lighting
+#define SKYRIMRENDERER_DEBUG_VIEW_LIGHTING       8u  // lighting on white albedo, tone mapped (incl. self-shadow / AO)
+
+// Views other than WIREFRAME write opaque pixels (alpha-tested meshes) over
+// the background and skip the ground shadow (LIGHTING keeps it). Unknown
+// modes are NONE.
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugView(uint32_t scene, uint32_t mode);
+
+// Bone for SKIN_WEIGHTS (NIF bone name, case-insensitive, e.g. "NPC Head [Head]").
+// NULL or "" shows the influence count instead.
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugViewBone(uint32_t scene, const char* boneName);
+
+struct SkyrimRenderer_SceneLookState {
+    uint32_t structSize;          // in: sizeof(SkyrimRenderer_SceneLookState)
+    uint32_t groundShadowMode;    // SKYRIMRENDERER_GROUND_SHADOW_*
+    float    groundShadowOpacity;
+    float    groundShadowSoftness;
+    int32_t  selfShadow;
+    float    selfShadowStrength;
+    int32_t  ambientOcclusion;
+    float    aoRadius;
+    float    aoIntensity;
+    uint32_t debugView;           // SKYRIMRENDERER_DEBUG_VIEW_*
+    char     debugViewBone[128];
+};
+
+// Fill out (out->structSize must be set). Returns 1, or 0 for an unknown
+// scene or a too-small struct.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out);
+
 } // extern "C"

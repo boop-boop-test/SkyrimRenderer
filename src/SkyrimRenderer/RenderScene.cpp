@@ -119,6 +119,9 @@ RenderScene::RenderScene(uint32_t width, uint32_t height, const std::filesystem:
 
     meshRenderer_ = std::make_unique<MeshRenderer>(shader_);
 
+    // Ground shadow / self-shadow / SSAO / debug views (all off; shaders compile on first use)
+    sceneLook_ = std::make_unique<SceneLook>(device_, shaderDir);
+
     // Community Shaders path (process-wide; no-op unless opted in and CS present)
     CSRenderPath::Get().Initialize(device_, shaderDir);
 
@@ -140,6 +143,7 @@ RenderScene::~RenderScene() {
         }
     }
 
+    sceneLook_.reset();
     renderTarget_.Release();
     shader_.Release();
     meshRenderer_.reset();
@@ -156,6 +160,7 @@ RenderScene::RenderScene(RenderScene&& other) noexcept {
     renderTarget_ = std::move(other.renderTarget_);
     shader_ = std::move(other.shader_);
     meshRenderer_ = std::move(other.meshRenderer_);
+    sceneLook_ = std::move(other.sceneLook_);
     camera_ = other.camera_;
     sceneRoot_ = std::move(other.sceneRoot_);
     nextNodeHandle_ = other.nextNodeHandle_;
@@ -199,6 +204,7 @@ RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
         renderTarget_ = std::move(other.renderTarget_);
         shader_ = std::move(other.shader_);
         meshRenderer_ = std::move(other.meshRenderer_);
+        sceneLook_ = std::move(other.sceneLook_);
         camera_ = other.camera_;
         sceneRoot_ = std::move(other.sceneRoot_);
         nextNodeHandle_ = other.nextNodeHandle_;
@@ -1183,6 +1189,29 @@ Result RenderScene::Render(bool saveState) {
         ppFrameCount_++;
     }
 
+    // ── Scene look: shadow map, AO prepass, ground shadow ───────────────
+    // Before the actor so it draws over the ground shadow. With every option
+    // off this only binds null SceneLook inputs around the usual draw.
+    SceneLookFrame lookFrame{};
+    if (sceneLook_ && !loadedMeshes_.empty() && shader_.IsReady()) {
+        const float lookAspect = static_cast<float>(renderTarget_.GetWidth()) /
+                                 static_cast<float>(renderTarget_.GetHeight());
+        lookFrame.ctx = context_;
+        lookFrame.shader = &shader_;
+        lookFrame.meshRenderer = meshRenderer_.get();
+        lookFrame.meshes = &loadedMeshes_;
+        lookFrame.pose = gpuSkinningPose_;
+        lookFrame.frame = BuildPerFrameData();
+        lookFrame.view = camera_.GetView();
+        lookFrame.projection = camera_.GetProjection(lookAspect);
+        lookFrame.cameraPos = {camPos.x, camPos.y, camPos.z};
+        lookFrame.rtv = renderTarget_.GetRTV();
+        lookFrame.dsv = renderTarget_.GetDSV();
+        lookFrame.width = renderTarget_.GetWidth();
+        lookFrame.height = renderTarget_.GetHeight();
+        sceneLook_->PrepareFrame(lookFrame);
+    }
+
     // ── Frame overlay: stencil mask pass ────────────────────────────────
     bool overlayActive = frameOverlayConfig_.enabled && frameOverlay_.IsReady() && frameOverlay_.HasTextures();
     if (overlayActive) {
@@ -1242,7 +1271,15 @@ Result RenderScene::Render(bool saveState) {
 
             // Set the GPU skinning pose for the mesh renderer
             meshRenderer_->SetCurrentPose(gpuSkinningPose_);
-            meshRenderer_->DrawMeshes(context_, loadedMeshes_);
+            if (lookFrame.ctx) {
+                // Self-shadow / AO inputs, or the debug view, around the same draw
+                lookFrame.frame = frameData;
+                sceneLook_->DrawMainPass(lookFrame, csActive);
+            } else {
+                ID3D11Buffer* noSceneLook = nullptr;  // SceneLook.hlsl b6 reads zeros: all off
+                context_->PSSetConstantBuffers(6, 1, &noSceneLook);
+                meshRenderer_->DrawMeshes(context_, loadedMeshes_);
+            }
             meshRenderer_->SetCurrentPose(nullptr);
 
             if (overlayActive) {

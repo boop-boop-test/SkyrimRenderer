@@ -742,3 +742,54 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* 
     if (out_whitePoint) *out_whitePoint = whitePoint;
     return rs ? 1 : 0;
 }
+
+// ---- Scene look (API 10) ---------------------------------------------------
+
+namespace {
+SceneLook* GetSceneLook(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetSceneLook() : nullptr;
+}
+}  // namespace
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetGroundShadow(uint32_t scene, uint32_t mode, float opacity, float softness) {
+    if (auto* look = GetSceneLook(scene)) look->SetGroundShadow(static_cast<GroundShadowMode>(mode), opacity, softness);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetSelfShadow(uint32_t scene, int32_t enabled, float strength) {
+    if (auto* look = GetSceneLook(scene)) look->SetSelfShadow(enabled != 0, strength);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetAmbientOcclusion(uint32_t scene, int32_t enabled, float radius, float intensity) {
+    if (auto* look = GetSceneLook(scene)) look->SetAmbientOcclusion(enabled != 0, radius, intensity);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugView(uint32_t scene, uint32_t mode) {
+    if (auto* look = GetSceneLook(scene)) look->SetDebugView(static_cast<DebugViewMode>(mode));
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetDebugViewBone(uint32_t scene, const char* boneName) {
+    if (auto* look = GetSceneLook(scene)) look->SetDebugViewBone(boneName ? boneName : "");
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRenderer_SceneLookState* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_SceneLookState)) return 0;
+    auto* look = GetSceneLook(scene);
+    if (!look) return 0;
+    const SceneLookSettings s = look->GetSettings();
+    const uint32_t structSize = out->structSize;
+    std::memset(out, 0, sizeof(SkyrimRenderer_SceneLookState));
+    out->structSize = structSize;
+    out->groundShadowMode = static_cast<uint32_t>(s.ground.mode);
+    out->groundShadowOpacity = s.ground.opacity;
+    out->groundShadowSoftness = s.ground.softness;
+    out->selfShadow = s.selfShadow.enabled ? 1 : 0;
+    out->selfShadowStrength = s.selfShadow.strength;
+    out->ambientOcclusion = s.ao.enabled ? 1 : 0;
+    out->aoRadius = s.ao.radius;
+    out->aoIntensity = s.ao.intensity;
+    out->debugView = static_cast<uint32_t>(s.debugView);
+    const size_t n = std::min(s.debugBone.size(), sizeof(out->debugViewBone) - 1);
+    std::memcpy(out->debugViewBone, s.debugBone.data(), n);
+    return 1;
+}
