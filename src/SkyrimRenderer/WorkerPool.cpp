@@ -3,6 +3,9 @@
 #include <SKSE/SKSE.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
+#include <string>
 #include <exception>
 #include <utility>
 #include <windows.h>
@@ -13,6 +16,8 @@ namespace {
 // Leave two cores to the engine (main + render threads), at most six workers.
 constexpr uint32_t kMaxWorkers = 6;
 constexpr uint32_t kReservedCores = 2;
+constexpr const char* kLimitPath = "Data/SKSE/Plugins/SkyrimRenderer_Workers.txt";
+constexpr auto kLimitCheckInterval = std::chrono::seconds(2);
 
 // fn(i) with a throw logged and the first one kept for the caller, so every
 // item runs whether the job is spread over the pool or run inline.
@@ -49,7 +54,39 @@ WorkerPool::WorkerPool() {
         workers_.emplace_back([this] { WorkerMain(); });
         SetThreadDescription(workers_.back().native_handle(), L"SkyrimRenderer worker");
     }
+    limit_.store(n, std::memory_order_relaxed);
     SKSE::log::info("[SkyrimRenderer] Worker pool: {} threads ({} hardware threads)", n, hw);
+}
+
+void WorkerPool::RefreshLimit() {
+    std::unique_lock lock(limitMutex_, std::try_to_lock);
+    if (!lock) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < nextLimitCheck_) return;
+    nextLimitCheck_ = now + kLimitCheckInterval;
+
+    std::error_code ec;
+    const auto time = std::filesystem::last_write_time(kLimitPath, ec);
+    const bool present = !ec;
+    if (present == limitFilePresent_ && (!present || time == limitFileTime_)) return;
+    limitFilePresent_ = present;
+    limitFileTime_ = present ? time : std::filesystem::file_time_type{};
+
+    uint32_t limit = WorkerCount();
+    if (present) {
+        std::ifstream in(kLimitPath);
+        for (std::string line; std::getline(in, line);) {
+            const auto hash = line.find('#');
+            if (hash != std::string::npos) line.resize(hash);
+            unsigned value = 0;
+            if (std::sscanf(line.c_str(), " workers = %u", &value) == 1) {
+                limit = std::min<uint32_t>(value, WorkerCount());
+            }
+        }
+    }
+    limit_.store(limit, std::memory_order_relaxed);
+    SKSE::log::info("[SkyrimRenderer] Worker pool: using {} of {} workers{}", limit, WorkerCount(),
+                    present ? " (SkyrimRenderer_Workers.txt)" : "");
 }
 
 void WorkerPool::RunItems() {
@@ -75,8 +112,10 @@ void WorkerPool::WorkerMain() {
 
 void WorkerPool::ParallelFor(uint32_t count, const std::function<void(uint32_t)>& fn) {
     if (count == 0) return;
+    RefreshLimit();
+    const uint32_t limit = WorkerLimit();
     bool idle = false;
-    if (count == 1 || workers_.empty() || !busy_.compare_exchange_strong(idle, true)) {
+    if (count == 1 || limit == 0 || !busy_.compare_exchange_strong(idle, true)) {
         std::mutex errorMutex;
         std::exception_ptr error;
         for (uint32_t i = 0; i < count; ++i) RunItem(fn, i, errorMutex, error);
@@ -90,7 +129,7 @@ void WorkerPool::ParallelFor(uint32_t count, const std::function<void(uint32_t)>
         count_ = count;
         next_.store(0, std::memory_order_relaxed);
         active_ = 0;
-        slots_ = std::min(WorkerCount(), count - 1);  // the caller takes one share
+        slots_ = std::min(limit, count - 1);  // the caller takes one share
     }
     wake_.notify_all();
 

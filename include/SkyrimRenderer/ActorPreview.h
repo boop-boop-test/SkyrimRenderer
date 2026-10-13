@@ -227,6 +227,10 @@ public:
     std::unique_lock<std::mutex> LockDrivenHead() { return std::unique_lock(mutex_); }
     /// Driven shapes of this head (lock held).
     uint32_t DrivenShapeCount() const { return static_cast<uint32_t>(drivenShapes_.size()); }
+    /// Vertices of a driven shape (lock held); 0 for an unknown index.
+    uint32_t DrivenShapeVertexCount(uint32_t shape) const {
+        return shape < drivenShapes_.size() ? static_cast<uint32_t>(drivenShapes_[shape].rest.size() / 3) : 0;
+    }
     /// CPU part for one shape: change check, rest + offset, normals, the GPU
     /// vertex image into the shape's own staging. Lock held by the caller; safe
     /// to run for different shapes on different threads at once (no D3D, no
@@ -385,6 +389,7 @@ private:
         std::vector<float> restNormals;    // xyz per vertex, as loaded
         std::vector<float> restTangents;   // xyzw per vertex, as loaded
         std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
+        std::vector<std::array<float, 3>> normalScratch;  // RecomputeNormals accumulator, reused
         bool pending = false;              // prepared, not yet uploaded
         bool stale = false;                // a prep threw after `uploaded` changed: redo it
     };

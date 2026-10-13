@@ -1538,11 +1538,15 @@ static void FillSkinnedVertices(const LoadedMesh& mesh, SkinnedVertex* out) {
 // replaces positions, so the NIF's baked normals describe the un-morphed face.
 // Triangle winding is taken from the NIF's own normals (majority vote) rather
 // than assumed, so a mesh with flipped winding still lights the right way.
-static void RecomputeNormals(LoadedMesh& mesh) {
+// `scratch` is caller-owned so the per-frame driven-head path allocates nothing
+// (a fresh ~100 KB block per shape per frame contended on the heap when shapes
+// were prepared in parallel).
+static void RecomputeNormals(LoadedMesh& mesh, std::vector<std::array<float, 3>>& scratch) {
     if (mesh.indices.size() < 3 || mesh.bindPoseVertices.size() != mesh.vertexCount) return;
     auto& verts = mesh.bindPoseVertices;
 
-    std::vector<std::array<float, 3>> accum(mesh.vertexCount, {0.0f, 0.0f, 0.0f});
+    auto& accum = scratch;
+    accum.assign(mesh.vertexCount, {0.0f, 0.0f, 0.0f});
     for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
         uint16_t ia = mesh.indices[i], ib = mesh.indices[i + 1], ic = mesh.indices[i + 2];
         if (ia >= mesh.vertexCount || ib >= mesh.vertexCount || ic >= mesh.vertexCount) continue;
@@ -1664,7 +1668,8 @@ bool ActorPreview::UploadLiveFacePositions(bool quiet) {
                 mesh.bindPoseVertices[v].position[1] = morphPositions[v][1];
                 mesh.bindPoseVertices[v].position[2] = morphPositions[v][2];
             }
-            RecomputeNormals(mesh);
+            std::vector<std::array<float, 3>> normalScratch;
+            RecomputeNormals(mesh, normalScratch);
 
             const bool uploaded = UploadMeshBindPose(meshIndex);
 
@@ -1918,7 +1923,7 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
         std::memcpy(bp.normal, &ds.restNormals[v * 3], 3 * sizeof(float));
         std::memcpy(bp.tangent, &ds.restTangents[v * 4], 4 * sizeof(float));
     }
-    if (recompute) RecomputeNormals(mesh);
+    if (recompute) RecomputeNormals(mesh, ds.normalScratch);
     if (mesh.isGPUSkinned && mesh.vertexCount == n) {
         ds.staged.resize(n * sizeof(SkinnedVertex));
         FillSkinnedVertices(mesh, reinterpret_cast<SkinnedVertex*>(ds.staged.data()));
