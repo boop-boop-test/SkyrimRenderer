@@ -436,8 +436,17 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor);
 //                   with SKYRIMRENDERER_HEAD_DRIVE_OFFSETS.
 //   restPositions:  the loaded positions, read-only.
 //
-// Pointers stay valid until DestroyActorPreview. A head preview never rebuilds
-// itself (Equip* / RebuildWithCurrentOutfit are refused on it). The other calls
+// Full actor previews (LoadActorPreview) have the same driven head once
+// SetHeadDriveFlags is called on them (off until then: no cost): the FaceGen
+// face and the head parts, never armor or the body. Their shapes are rebuilt,
+// and the arrays reset, whenever the preview rebuilds its meshes (Equip*,
+// RebuildWithCurrentOutfit, live mirror EQUIPMENT) or a head mesh is added or
+// removed (a hood hiding the hair): GetHeadShapeGeneration then changes, and
+// shape indices and positions pointers from before must be fetched again.
+//
+// Pointers stay valid until DestroyActorPreview (on a full preview: until the
+// generation changes). A head preview never rebuilds itself (Equip* /
+// RebuildWithCurrentOutfit are refused on it). The other calls
 // here are game main thread only. Any thread may write the arrays, as long
 // as the write finishes before the render that should show it starts (e.g.
 // the workers are joined before RenderToTexture(s) is called), no render of
@@ -511,8 +520,12 @@ struct SkyrimRenderer_HeadSourceInfo {
 // (DestroyActorPreview frees it), 0 on failure.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorHead(uint32_t scene, uint32_t formID);
 
-// Shapes of a head actor (0 for anything else).
+// Shapes of a head actor, or of a full preview with a driven head (0 otherwise).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeCount(uint32_t actor);
+
+// Changes whenever the driven shapes are rebuilt (see above); 0 for an unknown
+// actor. Compare it before reusing shape indices or positions pointers.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor);
 
 // Fill out (out->structSize must be set). Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
@@ -522,8 +535,26 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRenderer_HeadSourceInfo* out);
 
 // SKYRIMRENDERER_HEAD_DRIVE_* for every shape of a head actor. Changing
-// OFFSETS resets every positions[] array (to rest, or to zeros).
+// OFFSETS resets every positions[] array (to rest, or to zeros). On a full
+// preview the first call builds the driven head (arrays per these flags).
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags);
+
+// Turn a bone after the pose: a model-space rotation applied to the bone and
+// every bone under it after each pose (animation sample, bind pose, live
+// mirror), about the bone's own position. For the bones under it that is
+// local' = parent^T * R * parent * local, as the game's FaceModulator-style
+// head turns do, so skin weights blend the neck and a helmet follows the head.
+// modelRot: 9 floats, row-major, column-vector convention (NiMatrix3
+// entry[row][col]; v' = R * v). NULL clears the bone; boneName NULL or ""
+// clears every bone. Returns 1, or 0 for a bone the skeleton does not have or
+// a non-finite matrix. Game main thread; GPU-skinned previews (the default).
+//
+// Preview / model space is the game's actor space: +Y forward (where the
+// actor faces), +Z up, +X the actor's right. A yaw-0 camera sits on +Y looking
+// at the actor, so the actor's right (+X) is on the image's left. Camera
+// presets measure the head when called: set the camera before turning it.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetBoneRotation(uint32_t actor, const char* boneName,
+                                                          const float* modelRot);
 
 // ===========================================================================
 // Batched render, render stats, tone mapping

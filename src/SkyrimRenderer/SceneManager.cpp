@@ -364,7 +364,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     {
         std::lock_guard lock(mutex_);
         for (auto& [id, actor] : actors_) {
-            if (!actor || !actor->IsHeadOnly()) continue;
+            if (!actor || !actor->HasDrivenHead()) continue;
             for (size_t i = 0; i < scenes.size(); ++i) {
                 if (&actor->GetScene() == scenes[i]) {
                     heads.push_back({actor.get(), i});
@@ -380,6 +380,7 @@ Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes,
     headLocks.reserve(heads.size());
     for (uint32_t h = 0; h < heads.size(); ++h) {
         headLocks.push_back(heads[h].actor->LockDrivenHead());
+        heads[h].actor->ValidateDrivenHeadLocked();
         const uint32_t shapes = heads[h].actor->DrivenShapeCount();
         for (uint32_t s = 0; s < shapes; ++s) {
             jobs.push_back({h, s, heads[h].actor->DrivenShapeVertexCount(s)});

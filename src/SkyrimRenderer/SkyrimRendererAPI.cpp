@@ -709,6 +709,17 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
 }
 
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeGeneration() : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetBoneRotation(uint32_t actor, const char* boneName,
+                                                          const float* modelRot) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->SetBoneRotation(boneName, modelRot) ? 1 : 0;
+}
+
 // --- Batched render, render stats, tone mapping -----------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count) {
