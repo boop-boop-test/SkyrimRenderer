@@ -1,5 +1,5 @@
-// C API for the live mirror (API 10). Kept apart from SkyrimRendererAPI.cpp;
-// see SkyrimRendererAPI.h "Live mirror (API 10)" for the contract.
+// C API for the live mirror. Kept apart from SkyrimRendererAPI.cpp;
+// see SkyrimRendererAPI.h "Live mirror" for the contract.
 
 #include "SkyrimRenderer/SkyrimRendererAPI.h"
 #include "SkyrimRenderer/ActorPreview.h"

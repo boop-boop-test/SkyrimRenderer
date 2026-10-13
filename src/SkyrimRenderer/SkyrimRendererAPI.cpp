@@ -638,7 +638,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SkyPatcherLoad(void) {
 
 
 // ============================================================================
-// API v2
+// Texture mode, device-lost guard, live face
 // ============================================================================
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetSceneTextureMode(uint32_t scene, int32_t enabled) {
@@ -680,7 +680,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor) {
     return SceneManager::GetInstance().RefreshLiveFace(ToActor(actor)) ? 1 : 0;
 }
 
-// --- API v4: drivable head --------------------------------------------------
+// --- Drivable head ----------------------------------------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorHead(uint32_t scene, uint32_t formID) {
     return static_cast<uint32_t>(SceneManager::GetInstance().LoadActorHead(
@@ -709,7 +709,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
 }
 
-// --- API v9: batched render, render stats, tone mapping ---------------------
+// --- Batched render, render stats, tone mapping -----------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count) {
     if (!scenes || count == 0) return FromResult(Result::InvalidHandle);
@@ -750,7 +750,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* 
     return rs ? 1 : 0;
 }
 
-// ---- Export (API 10) ----
+// ---- Export ----
 
 static_assert(SKYRIMRENDERER_EXPORT_SHEET == static_cast<uint32_t>(TurntableExporter::Format::Sheet) &&
               SKYRIMRENDERER_EXPORT_FRAMES == static_cast<uint32_t>(TurntableExporter::Format::Frames) &&
@@ -875,7 +875,7 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadItemPreview(uint32_t scene, uint3
     return ItemPreview::Load(ToScene(scene), static_cast<RE::FormID>(formID), flags);
 }
 
-// ---- Scene look (API 10) ---------------------------------------------------
+// ---- Scene look -----------------------------------------------------------
 
 namespace {
 SceneLook* GetSceneLook(uint32_t scene) {
@@ -926,7 +926,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRen
     return 1;
 }
 
-// --- API 10: equipment & picking --------------------------------------------
+// --- Equipment & picking ----------------------------------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn) {
     if (hand != SKYRIMRENDERER_HAND_RIGHT && hand != SKYRIMRENDERER_HAND_LEFT) {
@@ -1012,7 +1012,7 @@ SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t f
     SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
 }
 
-// ---- Materials (API 10) ----
+// ---- Materials ----
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled) {
     if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEffectShadersEnabled(enabled != 0);
@@ -1032,7 +1032,7 @@ SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
     return rs ? rs->GetEmissiveScale() : 1.0f;
 }
 
-// ---- Camera lens and framing (API 10) ----
+// ---- Camera lens and framing ----
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetFieldOfView(uint32_t scene, float degrees) {
     if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetFOV(degrees);
@@ -1052,7 +1052,7 @@ SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene) {
     return rs ? rs->GetFramingScale() : 0.0f;
 }
 
-// ---- Prep workers (API 10) ----
+// ---- Prep workers ----
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers) {
     return WorkerPool::Get().SetLimit(workers);
