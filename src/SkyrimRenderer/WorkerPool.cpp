@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <exception>
 #include <utility>
+#include <vector>
 #include <windows.h>
 
 namespace SkyrimRenderer {
@@ -13,6 +14,29 @@ namespace {
 // Leave two cores to the engine (main + render threads), at most six workers.
 constexpr uint32_t kMaxWorkers = 6;
 constexpr uint32_t kReservedCores = 2;
+// Workers used by default: half the physical cores minus one, at most three.
+// Measured in game (NTJH, 8-core / 16-thread Ryzen 3700X, two driven heads):
+// prep wall time flattens at 2-3 workers while every added worker inflates
+// total prep CPU (1.7 ms at 0 -> 3.5 at 3 -> 4.8 at 6, per head), because the
+// game's own threads are busy at the same time. 3 workers = 6's wall time for
+// ~25% less CPU. The pool keeps kMaxWorkers threads for SetLimit to raise to.
+constexpr uint32_t kMaxDefaultWorkers = 3;
+
+uint32_t PhysicalCoreCount() {
+    DWORD bytes = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
+    if (bytes == 0) return 0;
+    std::vector<uint8_t> buffer(bytes);
+    auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, info, &bytes)) return 0;
+    uint32_t cores = 0;
+    for (DWORD offset = 0; offset < bytes;) {
+        auto* entry = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+        if (entry->Relationship == RelationProcessorCore) ++cores;
+        offset += entry->Size;
+    }
+    return cores;
+}
 
 // fn(i) with a throw logged and the first one kept for the caller, so every
 // item runs whether the job is spread over the pool or run inline.
@@ -49,12 +73,16 @@ WorkerPool::WorkerPool() {
         workers_.emplace_back([this] { WorkerMain(); });
         SetThreadDescription(workers_.back().native_handle(), L"SkyrimRenderer worker");
     }
-    limit_.store(n, std::memory_order_relaxed);
-    SKSE::log::info("[SkyrimRenderer] Worker pool: {} threads ({} hardware threads)", n, hw);
+    uint32_t cores = PhysicalCoreCount();
+    if (cores == 0) cores = std::max(1u, hw / 2);  // query failed: assume SMT
+    defaultLimit_ = std::min({n, kMaxDefaultWorkers, cores > 2 ? cores / 2 - 1 : 0u});
+    limit_.store(defaultLimit_, std::memory_order_relaxed);
+    SKSE::log::info("[SkyrimRenderer] Worker pool: {} threads, using {} by default ({} cores, {} hardware threads)",
+                    n, defaultLimit_, cores, hw);
 }
 
 uint32_t WorkerPool::SetLimit(int32_t limit) {
-    const uint32_t applied = limit < 0 ? WorkerCount() : std::min(static_cast<uint32_t>(limit), WorkerCount());
+    const uint32_t applied = limit < 0 ? defaultLimit_ : std::min(static_cast<uint32_t>(limit), WorkerCount());
     limit_.store(applied, std::memory_order_relaxed);
     SKSE::log::info("[SkyrimRenderer] Worker pool: using {} of {} workers", applied, WorkerCount());
     return applied;

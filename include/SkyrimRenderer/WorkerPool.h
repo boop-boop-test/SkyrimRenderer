@@ -31,10 +31,12 @@ public:
     void ParallelFor(uint32_t count, const std::function<void(uint32_t)>& fn);
 
     uint32_t WorkerCount() const { return static_cast<uint32_t>(workers_.size()); }
-    /// Workers a ParallelFor may use (WorkerCount unless capped).
+    /// Workers a ParallelFor may use (DefaultLimit unless changed).
     uint32_t WorkerLimit() const { return limit_.load(std::memory_order_relaxed); }
+    /// Physical-core based default (half the cores minus one, at most 3).
+    uint32_t DefaultLimit() const { return defaultLimit_; }
     /// Cap the workers per ParallelFor: 0 = all on the calling thread, at most
-    /// WorkerCount; negative = back to WorkerCount. Returns the applied cap.
+    /// WorkerCount; negative = back to DefaultLimit. Returns the applied cap.
     uint32_t SetLimit(int32_t limit);
 
 private:
@@ -58,6 +60,7 @@ private:
     std::exception_ptr error_;  // first throw of the current job
 
     std::atomic<uint32_t> limit_{0};
+    uint32_t defaultLimit_ = 0;
 };
 
 } // namespace SkyrimRenderer

@@ -1125,8 +1125,10 @@ SKYRIMRENDERER_API float   SkyrimRenderer_GetEmissiveScale(uint32_t scene);
 // Driven-head vertex prep runs on a small worker pool plus the calling thread
 // (see RenderToTextures). Process-wide tuning, shared by every mod: cap the
 // workers it may use. 0 = all prep on the calling thread; at most the pool
-// size; negative = back to the default (the pool size). Returns the cap now
-// in effect. Any thread; applies from the next render.
+// size; negative = back to the default. The default is half the physical
+// cores minus one, at most 3 (more workers than that raised total CPU with no
+// faster prep in game). Returns the cap now in effect. Any thread; applies
+// from the next render.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers);
 // Current cap; out_poolSize (optional) gets the pool size (hardware threads - 2,
 // at most 6; 0 on a machine with too few cores to have a pool).
