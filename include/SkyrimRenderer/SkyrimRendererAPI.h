@@ -1393,10 +1393,11 @@ enum {
 SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint8_t* rgba, uint32_t bufSize,
                                                               uint32_t* width, uint32_t* height);
 
-// Engine textures (outputs with engineTexture = 1). EXPERIMENTAL until
-// verified in game (NTJH issue 165, gate 1): engineTexture stays NULL and the
-// output FAILED with the reason when the engine does not hand out a private
-// texture object.
+// Engine textures (outputs with engineTexture = 1). Verified in game on AE
+// 1.6.1170 (NTJH issue 165, gate 1: per-actor eye material swaps on envmap
+// and glow eye materials, restore, no placeholder left behind); SE and VR
+// not yet. Fails closed: engineTexture stays NULL and the output FAILED with
+// the reason whenever the engine does not hand out a private texture object.
 //   - The engine only hands out a private texture object for a file that
 //     exists, so the renderer writes a placeholder DDS (BC1, the output's
 //     size and mip count) under a unique name
