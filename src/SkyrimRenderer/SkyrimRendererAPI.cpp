@@ -1005,6 +1005,7 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
 
 SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID) {
     SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
+}
 
 // ---- Materials (API 10) ----
 

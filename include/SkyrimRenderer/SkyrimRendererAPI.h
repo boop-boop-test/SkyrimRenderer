@@ -123,7 +123,13 @@ extern "C" {
 //       vertex prep in parallel), GetLastRenderStats, Set/GetToneMapping
 //       (vanilla-style Reinhard tone mapping, on by default from 1.8.0);
 //       driven-head arrays may be written from any thread (see API v4).
-#define SKYRIMRENDERER_API_VERSION 9
+//  10 - build 1.9.0: export (turntables, animation strips, item previews,
+//       scaled PNG), scene look (ground shadow, self-shadow, SSAO, debug
+//       views), live mirror (actor from a reference, pose / face / equipment
+//       mirroring, expression morphs, face cam), held weapons, picking and
+//       highlight, materials (TruePBR, glow / emissive, effect shaders).
+//       Refraction shapes are no longer drawn.
+#define SKYRIMRENDERER_API_VERSION 10
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
