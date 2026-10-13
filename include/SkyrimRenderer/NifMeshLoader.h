@@ -65,6 +65,8 @@ enum class ShadingModel : uint32_t {
     HairTint   = 3,  // Feature 6: hair with uniform tint
     EyeEnvMap  = 4,  // Feature 16: eye shader (Fresnel reflection + env mask)
     EnvironmentMap = 5,  // Feature 1: cubemap environment map (metallic armor reflections)
+    Glowmap    = 6,  // Feature 2: glow map (NIF slot 2) adds emissive light
+    TruePBR    = 7,  // Community Shaders TruePBR (kMenuScreen flag): RMAOS, emissive, GGX
 };
 
 /// Per-mesh shader flags — orthogonal to ShadingModel.
@@ -80,6 +82,26 @@ enum class ShaderFlags : uint32_t {
     BackLighting      = 1 << 6,  // sf2 bit 27: SLSF2_BACK_LIGHTING
     Decal             = 1 << 7,  // sf1 bit 26: SLSF1_DECAL — triggers DEPTH_WRITE_DECALS for HAIR technique
     DynamicDecal      = 1 << 8,  // sf1 bit 27: SLSF1_DYNAMIC_DECAL — engine-side depth bias for runtime decals
+    OwnEmit           = 1 << 9,  // sf1 bit 22: SLSF1_OWN_EMIT — the material's emissive colour lights it
+};
+
+/// BSEffectShaderProperty material (glows, flames, auras), drawn unlit after
+/// the lit passes. See EffectShaderPass.
+struct EffectMaterial {
+    float uvOffset[2] = {0.0f, 0.0f};
+    float uvScale[2] = {1.0f, 1.0f};
+    float baseColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};  // emissive colour (rgba)
+    float baseColorScale = 1.0f;                     // emissive multiple
+    float falloff[4] = {1.0f, 1.0f, 1.0f, 1.0f};     // start/stop angle (cos), start/stop opacity
+    bool falloffEnabled = false;      // SLSF1 bit 6
+    bool greyscaleToColor = false;    // SLSF1 bit 4 (needs the greyscale texture)
+    bool greyscaleToAlpha = false;    // SLSF1 bit 5
+    bool vertexAlpha = false;         // SLSF1 bit 3
+    bool hasNormals = true;           // falloff needs them
+    uint8_t srcBlend = 6;             // NiAlphaProperty blend factors (6 SRC_ALPHA)
+    uint8_t dstBlend = 0;             //                                (0 ONE)
+    bool alphaBlend = false;          // NiAlphaProperty bit 0
+    float alphaTestRef = 0.0f;        // 0 = no test
 };
 
 /// Alpha rendering mode — determines blend state + depth write behavior.
@@ -179,6 +201,25 @@ struct LoadedMesh {
 
     // Tint color (multiplied with albedo — used for skin/hair tint)
     float tintColor[3] = {1.0f, 1.0f, 1.0f};
+
+    // Emissive (BSLightingShaderProperty emissive colour x multiple). Lights the
+    // material with SLSF1_OWN_EMIT, times the glow map (slot 2) for Glowmap,
+    // times the emissive map (slot 2) for TruePBR.
+    float emissiveColor[3] = {0.0f, 0.0f, 0.0f};
+    float emissiveMultiple = 1.0f;
+
+    // TruePBR parameters (CS repurposes the NIF fields): roughness scale =
+    // specular strength, specular level = glossiness, displacement scale =
+    // lighting effect 2. Slot 5 (envMaskSRV) is RMAOS, slot 2 (skSRV) emissive,
+    // slot 3 (detailSRV) displacement.
+    float pbrRoughnessScale = 1.0f;
+    float pbrSpecularLevel = 0.04f;
+    float pbrDisplacementScale = 0.0f;
+
+    // BSEffectShaderProperty shape: drawn by EffectShaderPass only (never by
+    // the lit passes). diffuseSRV = source texture, detailSRV = greyscale palette.
+    bool isEffect = false;
+    EffectMaterial effect;
 
     // ── Animation Support ──────────────────────────────────────────────────
 

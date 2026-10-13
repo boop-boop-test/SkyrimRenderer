@@ -172,6 +172,8 @@ std::optional<uint32_t> CSRenderPath::NeutralTexel(std::string_view name) {
         // FaceGen detail: 3.984375 * ((1/255, 0, 1/255) + d) = 1 at (63, 64, 63)
         // -> no detail (e.g. Lydia DF's head ships none).
         { "TexDetailSampler", 0xFF3F403F },
+        // TruePBR without an RMAOS map: CS binds the game's default white.
+        { "TexRMAOSSampler", 0xFFFFFFFF },
     };
     for (const auto& [texture, texel] : kNeutral) {
         if (name == texture) return texel;
@@ -260,7 +262,7 @@ bool CSRenderPath::Initialize(ID3D11Device* device, const std::filesystem::path&
     }
 
     initialized_ = true;
-    SKSE::log::info("[CSRenderPath] on: Community Shaders {} (faces, eyes, hair)", install.version);
+    SKSE::log::info("[CSRenderPath] on: Community Shaders {} (faces, eyes, hair, TruePBR)", install.version);
     return true;
 }
 
@@ -303,7 +305,16 @@ std::optional<uint32_t> CSRenderPath::DescriptorFor(const LoadedMesh& mesh) cons
         case ShadingModel::FaceGenRGB: technique = T::FacegenRGBTint; break;
         case ShadingModel::HairTint:   technique = T::Hair; break;
         case ShadingModel::EyeEnvMap:  technique = T::Eye; break;
-        default: return std::nullopt;  // first slice: faces, eyes, hair
+        case ShadingModel::TruePBR: {
+            // CS's TruePBR shader (the same permutation it draws PBR clutter and
+            // armor with in game): default technique + the TruePbr bit. CS clears
+            // the vanilla specular / soft / rim / back lighting features on PBR
+            // materials, so only vertex colour and the alpha test remain.
+            uint32_t pbrFlags = F::VertexColor | F::TruePbr;
+            if (mesh.alphaMode == AlphaMode::Cutout || mesh.alphaCutoff > 0.0f) pbrFlags |= F::DoAlphaTest;
+            return CS::LightingDescriptor(T::None, pbrFlags);
+        }
+        default: return std::nullopt;  // faces, eyes, hair and TruePBR only
     }
 
     // Built the way the game builds the PS descriptor: vertex colour always on
@@ -440,6 +451,13 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
                             mesh.specularColorRGB[2] * specStr, mesh.specularGlossiness));
             SetVar(b, &cb, "LightingEffectParams", XMFLOAT4(mesh.softLightingRolloff, mesh.rimLightPower, 0, 0));
             SetVar(b, &cb, "MaterialObjectRGBScale", XMFLOAT3(1, 1, 1));
+            if (mesh.shadingModel == ShadingModel::TruePBR) {
+                // PBR::Flags::HasEmissive (bit 0) when the material has an emissive map.
+                SetVar(b, &cb, "PBRFlags", mesh.skSRV ? 1u : 0u);
+                SetVar(b, &cb, "PBRParams1",
+                       XMFLOAT3(mesh.pbrRoughnessScale, mesh.pbrDisplacementScale, mesh.pbrSpecularLevel));
+                SetVar(b, &cb, "PBRParams2", XMFLOAT4(1, 1, 1, 1));
+            }
         } else if (cb.name == "PerGeometry") {
             XMFLOAT3 dir = frame_.keyLightDir;
             if (knobs_.lightDir) XMStoreFloat3(&dir, XMVector3Normalize(XMLoadFloat3(&*knobs_.lightDir)));
@@ -449,6 +467,12 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
             SetVar(b, &cb, "DirLightColor", color);
             SetVar(b, &cb, "MaterialData", XMFLOAT4(1, 1, mesh.materialAlpha, 0));
             SetVar(b, &cb, "AlphaTestRef", mesh.alphaCutoff);
+            // Own emittance (and the PBR emissive colour), as the native path.
+            if (mesh.shadingModel == ShadingModel::TruePBR || HasFlag(mesh.shaderFlags, ShaderFlags::OwnEmit)) {
+                const float m = mesh.emissiveMultiple * emissiveScale_;
+                SetVar(b, &cb, "EmitColor",
+                       XMFLOAT3(mesh.emissiveColor[0] * m, mesh.emissiveColor[1] * m, mesh.emissiveColor[2] * m));
+            }
             // Hemisphere ambient as the game's directional-ambient matrix:
             // colour(n) = t + M n, with only the Z (up/down) column used.
             const auto& a = frame_.ambient;
@@ -544,6 +568,15 @@ bool CSRenderPath::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, bool g
     }
     srvs[9] = mesh.backlightSRV.Get();
     srvs[12] = mesh.skSRV.Get();  // soft / rim lighting mask
+    if (mesh.shadingModel == ShadingModel::TruePBR) {
+        // NIF slot 2 emissive -> TexGlowSampler, 3 displacement -> TexParallaxSampler,
+        // 5 RMAOS -> TexRMAOSSampler; no specular map, no soft-lighting mask.
+        srvs[2] = nullptr;
+        srvs[4] = mesh.detailSRV.Get();
+        srvs[5] = mesh.envMaskSRV.Get();
+        srvs[6] = mesh.skSRV.Get();
+        srvs[12] = nullptr;
+    }
     for (uint32_t slot : { 30u, 31u, 61u, 63u, 64u, 73u, 76u, 77u, 78u, 79u }) {
         srvs[slot] = CS::LiveResources::Get().Texture(slot);
     }

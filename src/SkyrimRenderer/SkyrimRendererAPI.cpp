@@ -1005,4 +1005,23 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHighlight(
 
 SKYRIMRENDERER_API void SkyrimRenderer_ClearHighlight(uint32_t actor, uint32_t formID) {
     SceneManager::GetInstance().ClearHighlight(ToActor(actor), formID);
+
+// ---- Materials (API 10) ----
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetEffectShadersEnabled(uint32_t scene, int32_t enabled) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEffectShadersEnabled(enabled != 0);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetEffectShadersEnabled(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs && rs->GetEffectShadersEnabled() ? 1 : 0;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetEmissiveScale(uint32_t scene, float scale) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetEmissiveScale(scale);
+}
+
+SKYRIMRENDERER_API float SkyrimRenderer_GetEmissiveScale(uint32_t scene) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    return rs ? rs->GetEmissiveScale() : 1.0f;
 }

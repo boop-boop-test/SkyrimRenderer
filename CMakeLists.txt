@@ -83,6 +83,8 @@ set(SKYRIM_RENDERER_HEADERS
     include/SkyrimRenderer/LiveMirror.h
     include/SkyrimRenderer/PickRenderer.h
     include/SkyrimRenderer/RigidMeshLoader.h
+    include/SkyrimRenderer/MaterialSetup.h
+    include/SkyrimRenderer/EffectShaderPass.h
 )
 
 set(SKYRIM_RENDERER_SOURCES
@@ -130,6 +132,9 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/ShadowPass.cpp
     src/SkyrimRenderer/SSAOPass.cpp
     src/SkyrimRenderer/DebugViewPass.cpp
+    src/SkyrimRenderer/MaterialSetup.cpp
+    src/SkyrimRenderer/EffectShaderPass.cpp
+    src/SkyrimRenderer/RenderSceneMaterials.cpp
 )
 
 # Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at

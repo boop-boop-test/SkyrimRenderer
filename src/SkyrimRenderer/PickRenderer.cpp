@@ -275,7 +275,7 @@ bool PickRenderer::DrawIds(ID3D11DeviceContext* ctx, ShaderPipeline& shader,
     for (AlphaMode pass : {AlphaMode::Opaque, AlphaMode::Cutout, AlphaMode::Blended}) {
         for (size_t i = 0; i < meshes.size(); ++i) {
             const auto& mesh = meshes[i];
-            if (mesh.alphaMode != pass) continue;
+            if (mesh.alphaMode != pass || mesh.isEffect) continue;  // glows / flames don't block picks
             if (!mesh.vertexBuffer || !mesh.indexBuffer || mesh.indexCount == 0) continue;
 
             const bool skinned = mesh.isGPUSkinned && canSkin;

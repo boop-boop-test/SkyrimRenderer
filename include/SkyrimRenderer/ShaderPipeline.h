@@ -42,6 +42,10 @@ struct PerMeshData {
     float backlightScale;        // lightingEffectParams.z
     float materialAlpha = 1.0f;  // BSLightingShaderProperty alpha (vanilla MaterialData.z)
     float environmentMapScale = 1.0f;  // BSLightingShaderProperty envMapScale (packed into lightingEffectParams.w)
+    float emissiveColor[3] = {0.0f, 0.0f, 0.0f};  // colour x multiple x scene scale; 0 = no emission (emissiveParams.rgb)
+    float pbrRoughnessScale = 1.0f;     // pbrParams.x (TruePBR)
+    float pbrSpecularLevel = 0.04f;     // pbrParams.y
+    float pbrDisplacementScale = 0.0f;  // pbrParams.z
 };
 
 /// Manages the preview shader pipeline: VS, PS, input layout, render states,
@@ -96,6 +100,11 @@ public:
         return skinned ? skinnedInputLayout_.Get() : inputLayout_.Get();
     }
     ID3D11SamplerState* GetSamplerState() const { return samplerState_.Get(); }
+
+    /// Device and shader folder, for passes that compile their own shaders
+    /// from the same folder (EffectShaderPass).
+    ID3D11Device* GetDevice() const { return device_; }
+    const std::filesystem::path& GetShaderDir() const { return shaderDir_; }
 
     /// Re-bind our VS/PS, input layout, PS constant buffers and sampler after
     /// another path (Community Shaders) drew with its own. Leaves raster,
