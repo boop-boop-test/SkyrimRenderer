@@ -280,7 +280,7 @@ FaceMorphController::~FaceMorphController() = default;
 
 bool FaceMorphController::SetWeight(uint32_t group, uint32_t index, float weight) {
     if (group >= kGroupCount || index >= kGroupSize[group]) return false;
-    if (!std::isfinite(weight)) weight = 0.0f;
+    weight = std::isfinite(weight) ? std::clamp(weight, 0.0f, 1.0f) : 0.0f;  // documented 0..1
     float& slot = weights_[kGroupBase[group] + index];
     if (std::fabs(slot - weight) > kWeightEpsilon) {
         slot = weight;
@@ -293,7 +293,7 @@ bool FaceMorphController::SetWeight(uint32_t group, uint32_t index, float weight
 
 void FaceMorphController::SetWeights(const std::array<float, kSlotCount>& weights) {
     for (uint32_t s = 0; s < kSlotCount; ++s) {
-        float w = std::isfinite(weights[s]) ? weights[s] : 0.0f;
+        float w = std::isfinite(weights[s]) ? std::clamp(weights[s], 0.0f, 1.0f) : 0.0f;
         if (std::fabs(weights_[s] - w) <= kWeightEpsilon) continue;
         weights_[s] = w;
         for (auto& bm : meshes_) {

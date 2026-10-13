@@ -994,7 +994,8 @@ SKYRIMRENDERER_API void SkyrimRenderer_DestroyLiveFaceCam(uint32_t scene);
 // Equip a held item. hand: SKYRIMRENDERER_HAND_* (ignored for torches, ammo,
 // shields and two-handed weapons). drawn: 1 = in hand, 0 = sheathed; applies
 // to every held weapon of the actor (they are drawn or sheathed together).
-// Returns a Result (0 = success, 6 = InvalidParameter for other form types).
+// Returns a Result (0 = success, 6 = InvalidParameter for other form types or
+// an unknown hand value).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(
     uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn);
 

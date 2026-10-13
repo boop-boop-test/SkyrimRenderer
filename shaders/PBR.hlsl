@@ -15,6 +15,7 @@
 #define PBR_HLSL_INCLUDED
 
 #include "Common.hlsl"
+#include "SceneLook.hlsl"
 
 static const float kPbrPi = 3.14159265;
 
@@ -66,7 +67,10 @@ float3 ShadeTruePBR(float3 N, float3 V, float3 baseColor, float4 rmaos) {
 
     float3 lights[3]    = { light0Dir.xyz, light1Dir.xyz, light2Dir.xyz };
     float3 lightCols[3] = { light0Color.rgb, light1Color.rgb, light2Color.rgb };
-    float  lightInts[3] = { light0Dir.w, light1Dir.w, light2Dir.w };
+    // SceneLook_LightScale: key light self-shadow (exactly 1.0 when off)
+    float  lightInts[3] = { light0Dir.w * SceneLook_LightScale(0),
+                            light1Dir.w * SceneLook_LightScale(1),
+                            light2Dir.w * SceneLook_LightScale(2) };
 
     float3 diffuse = float3(0, 0, 0);
     float3 specular = float3(0, 0, 0);
@@ -88,9 +92,12 @@ float3 ShadeTruePBR(float3 N, float3 V, float3 baseColor, float4 rmaos) {
     // Ambient: hemisphere irradiance for diffuse, the hemisphere seen along the
     // reflection vector for specular, both occluded by AO.
     float3 R = reflect(-V, N);
-    float3 ambient = PBR_Hemisphere(N) * diffuseColor
-                   + PBR_Hemisphere(R) * PBR_EnvBRDFApprox(F0, roughness, NdotV);
-    return diffuse + specular + ambient * ao;
+    float3 ambient = (PBR_Hemisphere(N) * diffuseColor
+                    + PBR_Hemisphere(R) * PBR_EnvBRDFApprox(F0, roughness, NdotV)) * ao;
+    // Scene SSAO on top of the material's own (no-op when off). Needs
+    // SceneLook_BeginPixel earlier in the pixel, as PSMain does.
+    SceneLook_ApplyOcclusion(ambient, diffuse, specular);
+    return diffuse + specular + ambient;
 }
 
 #endif // PBR_HLSL_INCLUDED

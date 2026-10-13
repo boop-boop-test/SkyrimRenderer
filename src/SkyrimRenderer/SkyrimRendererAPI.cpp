@@ -927,6 +927,9 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetSceneLook(uint32_t scene, SkyrimRen
 // --- API 10: equipment & picking --------------------------------------------
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipWeapon(uint32_t actor, uint32_t formID, uint32_t hand, int32_t drawn) {
+    if (hand != SKYRIMRENDERER_HAND_RIGHT && hand != SKYRIMRENDERER_HAND_LEFT) {
+        return FromResult(Result::InvalidParameter);
+    }
     const auto h = hand == SKYRIMRENDERER_HAND_LEFT ? ActorPreview::HeldHand::Left : ActorPreview::HeldHand::Right;
     return FromResult(SceneManager::GetInstance().EquipWeapon(
         ToActor(actor), static_cast<RE::FormID>(formID), h, drawn != 0));

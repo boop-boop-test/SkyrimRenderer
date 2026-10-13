@@ -32,7 +32,25 @@ struct alignas(16) GPU_EffectParams {
 };
 
 // NiAlphaProperty blend factors.
-constexpr uint8_t kNiOne = 0, kNiZero = 1, kNiSrcColor = 2, kNiDestColor = 4;
+constexpr uint8_t kNiOne = 0, kNiZero = 1, kNiSrcColor = 2, kNiDestColor = 4, kNiSrcAlpha = 6;
+
+// NiAlphaProperty factor -> D3D11 (same order as the engine's table).
+D3D11_BLEND ToD3DBlend(uint8_t f) {
+    switch (f) {
+        case 0:  return D3D11_BLEND_ONE;
+        case 1:  return D3D11_BLEND_ZERO;
+        case 2:  return D3D11_BLEND_SRC_COLOR;
+        case 3:  return D3D11_BLEND_INV_SRC_COLOR;
+        case 4:  return D3D11_BLEND_DEST_COLOR;
+        case 5:  return D3D11_BLEND_INV_DEST_COLOR;
+        case 6:  return D3D11_BLEND_SRC_ALPHA;
+        case 7:  return D3D11_BLEND_INV_SRC_ALPHA;
+        case 8:  return D3D11_BLEND_DEST_ALPHA;
+        case 9:  return D3D11_BLEND_INV_DEST_ALPHA;
+        case 10: return D3D11_BLEND_SRC_ALPHA_SAT;
+        default: return D3D11_BLEND_ONE;
+    }
+}
 
 // Compiled bytecode, shared by every scene (keyed by shader folder).
 std::mutex g_blobMutex;
@@ -42,12 +60,57 @@ std::filesystem::path g_blobDir;
 } // namespace
 
 EffectShaderPass::Blend EffectShaderPass::BlendOf(const EffectMaterial& effect) {
-    if (effect.dstBlend == kNiOne) return Blend::Additive;
+    if (effect.dstBlend == kNiOne) {
+        // SRC_ALPHA, ONE: the shader premultiplies. ONE, ONE: colour as is.
+        // Other source factors keep their own factor (Alpha shaping).
+        if (effect.srcBlend == kNiSrcAlpha) return Blend::Additive;
+        if (effect.srcBlend == kNiOne) return Blend::AdditiveOne;
+        return Blend::Alpha;
+    }
     if ((effect.srcBlend == kNiDestColor && effect.dstBlend == kNiZero) ||
         (effect.srcBlend == kNiZero && effect.dstBlend == kNiSrcColor)) {
         return Blend::Multiply;
     }
     return Blend::Alpha;
+}
+
+ID3D11BlendState* EffectShaderPass::BlendStateFor(ID3D11DeviceContext* ctx, const EffectMaterial& effect, Blend blend) {
+    const uint32_t key = (static_cast<uint32_t>(effect.srcBlend) << 8) | effect.dstBlend;
+    auto& state = blendStates_[key];
+    if (state) return state.Get();
+
+    D3D11_BLEND_DESC desc{};
+    auto& rt = desc.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = ToD3DBlend(effect.srcBlend);
+    rt.DestBlend = ToD3DBlend(effect.dstBlend);
+    rt.BlendOp = D3D11_BLEND_OP_ADD;
+    // Alpha accumulates coverage like the lit blended pass; multiply leaves it alone.
+    rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+    rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    switch (blend) {
+        case Blend::Additive:  // the shader premultiplied: SRC_ALPHA becomes ONE
+            rt.SrcBlend = D3D11_BLEND_ONE;
+            break;
+        case Blend::Multiply:  // colour only; the shader writes the "no change" colour at zero alpha
+            rt.SrcBlend = D3D11_BLEND_DEST_COLOR;
+            rt.DestBlend = D3D11_BLEND_ZERO;
+            rt.SrcBlendAlpha = D3D11_BLEND_ZERO;
+            rt.DestBlendAlpha = D3D11_BLEND_ONE;
+            break;
+        default:
+            break;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    ctx->GetDevice(device.GetAddressOf());
+    if (!device || FAILED(device->CreateBlendState(&desc, state.GetAddressOf()))) {
+        blendStates_.erase(key);
+        return nullptr;
+    }
+    return state.Get();
 }
 
 bool EffectShaderPass::Initialize(ID3D11Device* device, const std::filesystem::path& shaderDir) {
@@ -102,29 +165,7 @@ bool EffectShaderPass::Initialize(ID3D11Device* device, const std::filesystem::p
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
     device->CreateSamplerState(&sampDesc, clampSampler_.GetAddressOf());
 
-    auto makeBlend = [&](D3D11_BLEND src, D3D11_BLEND dst, D3D11_BLEND srcA, D3D11_BLEND dstA,
-                         Microsoft::WRL::ComPtr<ID3D11BlendState>& out) {
-        D3D11_BLEND_DESC desc{};
-        auto& rt = desc.RenderTarget[0];
-        rt.BlendEnable = TRUE;
-        rt.SrcBlend = src;
-        rt.DestBlend = dst;
-        rt.BlendOp = D3D11_BLEND_OP_ADD;
-        rt.SrcBlendAlpha = srcA;
-        rt.DestBlendAlpha = dstA;
-        rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        device->CreateBlendState(&desc, out.GetAddressOf());
-    };
-    // Alpha: same as the lit blended pass (alpha accumulates coverage).
-    makeBlend(D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA,
-              blendAlpha_);
-    // Additive: the shader premultiplies colour; alpha gets the glow's coverage.
-    makeBlend(D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, blendAdditive_);
-    // Multiply: darkens what is behind, leaves alpha alone.
-    makeBlend(D3D11_BLEND_DEST_COLOR, D3D11_BLEND_ZERO, D3D11_BLEND_ZERO, D3D11_BLEND_ONE, blendMultiply_);
-
-    ready_ = ps_ && cb_ && clampSampler_ && blendAlpha_ && blendAdditive_ && blendMultiply_;
+    ready_ = ps_ && cb_ && clampSampler_;
     if (!ready_) {
         SKSE::log::warn("[EffectShaderPass] state creation failed; effect shapes are not drawn");
         failed_ = true;
@@ -171,9 +212,8 @@ void EffectShaderPass::Draw(ID3D11DeviceContext* ctx, const LoadedMesh& mesh, fl
     ctx->PSSetSamplers(1, 1, samplers);
 
     const float blendFactor[4] = { 0, 0, 0, 0 };
-    ID3D11BlendState* state = blend == Blend::Additive   ? blendAdditive_.Get()
-                              : blend == Blend::Multiply ? blendMultiply_.Get()
-                                                         : blendAlpha_.Get();
+    ID3D11BlendState* state = BlendStateFor(ctx, e, blend);
+    if (!state) return;
     ctx->OMSetBlendState(state, blendFactor, 0xFFFFFFFF);
     ctx->OMSetDepthStencilState(depthReadOnly, stencilRef);
 

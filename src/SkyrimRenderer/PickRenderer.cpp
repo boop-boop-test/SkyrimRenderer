@@ -17,8 +17,8 @@ namespace {
 struct alignas(16) GPU_PickParams {
     uint32_t id;
     float alphaCutoff;
-    float materialAlpha;
     uint32_t hasDiffuse;
+    uint32_t pad;
 };
 
 /// Matches cbuffer HighlightParams : register(b5) in Picking.hlsl
@@ -290,7 +290,6 @@ bool PickRenderer::DrawIds(ID3D11DeviceContext* ctx, ShaderPipeline& shader,
             GPU_PickParams params{};
             params.id = (static_cast<uint32_t>(i + 1) & kIdMask) |
                         (i < slots.size() ? static_cast<uint32_t>(slots[i]) << kSlotShift : 0u);
-            params.materialAlpha = mesh.materialAlpha;
             params.hasDiffuse = mesh.diffuseSRV ? 1u : 0u;
             if (mesh.alphaMode == AlphaMode::Cutout) {
                 params.alphaCutoff = mesh.alphaCutoff;

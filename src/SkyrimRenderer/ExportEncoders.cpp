@@ -91,7 +91,7 @@ bool EncodePNGToStream(IWICImagingFactory* factory, IStream* stream,
     return SUCCEEDED(encoder->Commit());
 }
 
-// â”€â”€ PNG chunk helpers (APNG assembly) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── PNG chunk helpers (APNG assembly) ────────────────────────────────────────
 
 uint32_t Crc32(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFFu) {
     static const auto table = [] {

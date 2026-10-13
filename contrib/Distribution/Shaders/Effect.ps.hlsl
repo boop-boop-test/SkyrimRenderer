@@ -22,9 +22,12 @@
 #define EFFECT_HAS_TEXTURE    (1 << 6)
 
 // Blend modes (EffectParams.flags.y)
-#define EFFECT_BLEND_ALPHA     0  // src alpha, inverse src alpha
-#define EFFECT_BLEND_ADDITIVE  1  // src alpha, one
-#define EFFECT_BLEND_MULTIPLY  2  // dest colour, zero (or zero, src colour)
+// The colour factors are the NIF's own (EffectShaderPass::BlendStateFor);
+// these only shape the output for them.
+#define EFFECT_BLEND_ALPHA         0  // any other pair: straight colour + alpha
+#define EFFECT_BLEND_ADDITIVE      1  // src alpha, one: premultiplied here (state uses one, one)
+#define EFFECT_BLEND_MULTIPLY      2  // dest colour, zero (or zero, src colour)
+#define EFFECT_BLEND_ADDITIVE_ONE  3  // one, one: colour as is
 
 cbuffer EffectParams : register(b4) {
     float4 effectBaseColor;   // rgba = emissive colour
@@ -87,7 +90,7 @@ float4 PSEffect(PSInput input) : SV_TARGET {
     color = saturate(color * effectScalars.x);
 
     if (effectScalars.y > 0.0) clip(alpha - effectScalars.y);
-    clip(alpha - 0.003);
+    if (blendMode != EFFECT_BLEND_ADDITIVE_ONE) clip(alpha - 0.003);  // ONE, ONE ignores alpha
     alpha = saturate(alpha);
 
     if (blendMode == EFFECT_BLEND_ADDITIVE) {
@@ -96,6 +99,10 @@ float4 PSEffect(PSInput input) : SV_TARGET {
         // texture-mode premultiplied contract.
         float3 added = color * alpha;
         return float4(added, saturate(max(added.r, max(added.g, added.b))));
+    }
+    if (blendMode == EFFECT_BLEND_ADDITIVE_ONE) {
+        // Alpha only feeds the coverage written to the target's alpha.
+        return float4(color, saturate(max(color.r, max(color.g, color.b))));
     }
     if (blendMode == EFFECT_BLEND_MULTIPLY) {
         return float4(lerp(float3(1, 1, 1), color, alpha), 0.0);

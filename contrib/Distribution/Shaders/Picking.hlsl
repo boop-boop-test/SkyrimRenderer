@@ -19,14 +19,14 @@
 cbuffer PickParams : register(b4) {
     uint  pickId;            // value written for this mesh
     float pickAlphaCutoff;   // < 0: no alpha test
-    float pickMaterialAlpha; // BSLightingShaderProperty alpha
     uint  pickHasDiffuse;
+    uint  pickPad;
 };
 
 uint PSPickID(PSInput input) : SV_Target {
     if (pickAlphaCutoff >= 0.0 && pickHasDiffuse != 0) {
-        float a = diffuseTexture.Sample(diffuseSampler, input.uv).a * pickMaterialAlpha;
-        clip(a - pickAlphaCutoff);
+        // Same test as the lit draw (Preview.ps.hlsl): texture alpha only.
+        clip(diffuseTexture.Sample(diffuseSampler, input.uv).a - pickAlphaCutoff);
     }
     return pickId;
 }

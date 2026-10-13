@@ -25,6 +25,7 @@ constexpr uint32_t kMaxFrameSide = 4096;              // per-frame render size c
 constexpr uint64_t kMaxOutputPixels = 1ull << 28;     // 1 GiB of RGBA in memory
 constexpr uint32_t kMaxOutputSide = 32768;
 constexpr uint32_t kMaxInFlight = 8;                  // staging textures per job
+constexpr size_t kMaxQueuedBytes = 256ull << 20;      // read-back frames waiting for the encoder (min 2 frames)
 constexpr size_t kKeepFinished = 64;                  // finished statuses kept for polling
 
 const char* FormatName(TurntableExporter::Format f) {
@@ -119,6 +120,12 @@ public:
     uint32_t Written() {
         std::lock_guard lock(mutex_);
         return written_;
+    }
+
+    /// Frames handed over but not yet taken by the encoder.
+    size_t Queued() {
+        std::lock_guard lock(mutex_);
+        return queue_.size();
     }
 
 private:
@@ -530,8 +537,13 @@ void TurntableExporter::TickJob(Job& job) {
     const uint32_t n = d.frameCount;
     const auto slots = static_cast<uint32_t>(job.staging.size());
 
-    // 1. Read back finished copies, in frame order, without waiting.
-    while (job.framesRead < job.nextFrame) {
+    // 1. Read back finished copies, in frame order, without waiting. The
+    //    encoder is slower than the GPU (PNG / GIF compression), so stop while
+    //    its queue is full: the unread copies keep their staging slots, which
+    //    also holds back step 2 until the encoder drains.
+    const size_t frameBytes = static_cast<size_t>(job.width) * job.height * 4;
+    const size_t maxQueued = std::max<size_t>(2, kMaxQueuedBytes / std::max<size_t>(frameBytes, 1));
+    while (job.framesRead < job.nextFrame && job.sink->Queued() < maxQueued) {
         auto* tex = job.staging[job.framesRead % slots].Get();
         D3D11_MAPPED_SUBRESOURCE mapped{};
         const HRESULT hr = ctx->Map(tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
