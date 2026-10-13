@@ -114,9 +114,34 @@ public:
 
     void SetENBMode(ENBMode mode);
 
+    // ── Tone mapping ────────────────────────────────────────────────────────
+
+    /// exposure multiplies the lit colour (<= 0 means 1). whitePoint: the
+    /// exposed brightness vanilla's Reinhard curve maps to white; <= 0 turns
+    /// the curve off (exposure, then a hard clip: builds before 1.8.0).
+    void SetToneMapping(float exposure, float whitePoint);
+    void GetToneMapping(float& exposure, float& whitePoint) const;
+
     // ── Rendering ───────────────────────────────────────────────────────────
 
-    Result Render();
+    /// saveState: save and restore the immediate context around the render.
+    /// False only when the caller holds one DX11StateGuard over several renders.
+    Result Render(bool saveState = true);
+
+    /// Timings of the last render of this scene (SceneManager fills them).
+    struct RenderStats {
+        uint32_t callSerial = 0;        // same value for scenes rendered by one call
+        uint32_t scenesInCall = 0;
+        uint32_t shapesUploaded = 0;
+        uint32_t verticesUploaded = 0;
+        float prepCpuMs = 0.0f;         // driven-head vertex prep, summed over threads
+        float uploadMs = 0.0f;          // vertex buffer uploads, calling thread
+        float renderMs = 0.0f;          // camera, accumulator, draws, calling thread
+        float callPrepMs = 0.0f;        // the call's parallel prep, wall time
+        float callMs = 0.0f;            // the whole call, wall time
+    };
+    void SetLastRenderStats(const RenderStats& stats);
+    RenderStats GetLastRenderStats() const;
     ID3D11ShaderResourceView* GetRenderedTexture() const;
     ID3D11Texture2D* GetRenderedTexture2D() const;
     Result ReadbackPixels(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight);
@@ -266,6 +291,13 @@ private:
 
     // Texture-consumer mode (premultiplied clear, no readback/composite)
     bool textureMode_ = false;
+
+    // Tone mapping (vanilla ISHDR Reinhard, fixed exposure)
+    float toneExposure_ = 1.4f;
+    float toneWhitePoint_ = 3.0f;
+
+    RenderStats lastStats_;
+    mutable std::mutex statsMutex_;
 
     // Frame overlay
     FrameOverlayRenderer frameOverlay_;

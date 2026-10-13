@@ -24,6 +24,7 @@ struct alignas(16) GPU_PerFrame {
     DirectX::XMFLOAT4 light2Color;
     DirectX::XMFLOAT4 ambientUp;       // rgb = sky, a = intensity
     DirectX::XMFLOAT4 ambientDown;     // rgb = ground
+    DirectX::XMFLOAT4 toneMap;         // x = exposure, y = Reinhard white point (0 = clip)
 };
 
 /// Matches cbuffer PerMesh : register(b1)
@@ -390,6 +391,7 @@ void ShaderPipeline::UpdatePerFrameConstants(ID3D11DeviceContext* ctx, const Per
 
     cb->ambientUp = DirectX::XMFLOAT4(frame.ambient.upColor.r, frame.ambient.upColor.g, frame.ambient.upColor.b, frame.ambient.intensity);
     cb->ambientDown = DirectX::XMFLOAT4(frame.ambient.downColor.r, frame.ambient.downColor.g, frame.ambient.downColor.b, 0.0f);
+    cb->toneMap = DirectX::XMFLOAT4(frame.toneExposure, frame.toneWhitePoint, 0.0f, 0.0f);
 
     ctx->Unmap(perFrameCB_.Get(), 0);
 }

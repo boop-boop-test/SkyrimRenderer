@@ -9,6 +9,21 @@
 #include "Lighting.hlsl"
 #include "ShadingModels.hlsl"
 
+// Vanilla ISHDR Reinhard, x * (1 + x * p) / (1 + x) with p = 1 / white^2, applied
+// to luminance and scaled back onto RGB so hues don't shift as they compress.
+// toneMap comes from the scene (SetToneMapping, default exposure 1.4, white 3.0).
+// All zeros (a DLL before 1.8.0) gives the old output: exposure 1, hard clip.
+float3 ToneMapReinhard(float3 color) {
+    color *= toneMap.x > 0.0 ? toneMap.x : 1.0;
+    float white = toneMap.y;
+    if (white <= 0.0) return min(color, 4.0);
+    float lum = dot(color, float3(0.2126, 0.7152, 0.0722));
+    if (lum <= 1e-5) return color;
+    float p = 1.0 / (white * white);
+    float mapped = lum * (1.0 + lum * p) / (1.0 + lum);
+    return color * (mapped / lum);
+}
+
 float4 PSMain(PSInput input) : SV_TARGET {
     float3 N = normalize(input.normal);
     float3 V = normalize(cameraPos.xyz - input.worldPos);
@@ -157,9 +172,13 @@ float4 PSMain(PSInput input) : SV_TARGET {
     // Env map: vanilla adds reflection modulated by diffuse lighting (line 1061)
     color += totalLight * envMapReflection;
 
-    // Vanilla output clamping (ColourOutputClamp) — we use a fixed clamp
-    // since we don't have the game's global clamp values.
-    color = min(color, 4.0);
+    // Tone mapping. Vanilla never hard-clips lit colour: it renders HDR, then the
+    // ISHDR pass scales by eye adaptation and applies Reinhard with a white point
+    // from the cell's ImageSpace (Community Shaders ISHDR.hlsl, hue-preserving form).
+    // We have no scene to adapt to, so exposure and white point are per scene
+    // settings. Without this, pale skin under the Portrait key + fill clips to
+    // flat white.
+    color = ToneMapReinhard(max(color, 0.0));
 
     // Vanilla (BSLightingShader.ps line 1169):
     //   outAlpha = vertexColor.w * MaterialData.z * diffuseAlpha

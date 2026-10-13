@@ -4,6 +4,7 @@
 #include "SkyrimRenderer/HKXLoader.h"
 #include "SkyrimRenderer/TextureCache.h"
 #include "SkyrimRenderer/TextureLoader.h"
+#include "SkyrimRenderer/WorkerPool.h"
 
 #include <RE/R/Renderer.h>
 #include <SKSE/SKSE.h>
@@ -12,6 +13,7 @@
 #include <cctype>
 #include <chrono>
 #include <future>
+#include <optional>
 #include <unordered_set>
 
 
@@ -333,21 +335,93 @@ bool SceneManager::CheckDeviceHealth(const char* where) {
 
 Result SceneManager::GuardedRender(RenderScene* scene, const char* where) {
     if (!scene) return Result::InvalidHandle;
+    return GuardedRenderBatch({scene}, where);
+}
+
+Result SceneManager::GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where) {
+    if (scenes.empty()) return Result::InvalidHandle;
     if (IsDeviceLost()) return Result::DeviceLost;
 
-    // Head previews: upload the caller-written vertex arrays that changed.
-    std::vector<ActorPreview*> heads;
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::duration d) { return std::chrono::duration<float, std::milli>(d).count(); };
+    const auto callStart = Clock::now();
+
+    // Head previews of the listed scenes: upload the caller-written vertex
+    // arrays that changed. The CPU part runs per shape across the worker pool;
+    // uploads stay on this thread.
+    struct Head { ActorPreview* actor; size_t scene; };
+    std::vector<Head> heads;
     {
         std::lock_guard lock(mutex_);
         for (auto& [id, actor] : actors_) {
-            if (actor && actor->IsHeadOnly() && &actor->GetScene() == scene) heads.push_back(actor.get());
+            if (!actor || !actor->IsHeadOnly()) continue;
+            for (size_t i = 0; i < scenes.size(); ++i) {
+                if (&actor->GetScene() == scenes[i]) {
+                    heads.push_back({actor.get(), i});
+                    break;
+                }
+            }
         }
     }
-    for (auto* head : heads) head->FlushDrivenHead();
 
-    Result result = scene->Render();
-    if (!CheckDeviceHealth(where)) return Result::DeviceLost;
-    return result;
+    struct Job { uint32_t head; uint32_t shape; uint32_t vertices = 0; float ms = 0.0f; };
+    std::vector<Job> jobs;
+    std::vector<std::unique_lock<std::mutex>> headLocks;
+    headLocks.reserve(heads.size());
+    for (uint32_t h = 0; h < heads.size(); ++h) {
+        headLocks.push_back(heads[h].actor->LockDrivenHead());
+        const uint32_t shapes = heads[h].actor->DrivenShapeCount();
+        for (uint32_t s = 0; s < shapes; ++s) jobs.push_back({h, s});
+    }
+
+    const auto prepStart = Clock::now();
+    WorkerPool::Get().ParallelFor(static_cast<uint32_t>(jobs.size()), [&](uint32_t j) {
+        const auto t0 = Clock::now();
+        jobs[j].vertices = heads[jobs[j].head].actor->PrepareDrivenShape(jobs[j].shape);
+        jobs[j].ms = ms(Clock::now() - t0);
+    });
+    const float callPrepMs = ms(Clock::now() - prepStart);
+
+    std::vector<RenderScene::RenderStats> stats(scenes.size());
+    for (const auto& job : jobs) {
+        auto& st = stats[heads[job.head].scene];
+        st.prepCpuMs += job.ms;
+        st.verticesUploaded += job.vertices;
+    }
+    for (const auto& head : heads) {
+        const auto t0 = Clock::now();
+        auto& st = stats[head.scene];
+        st.shapesUploaded += head.actor->CommitDrivenHead();
+        st.uploadMs += ms(Clock::now() - t0);
+    }
+    headLocks.clear();
+
+    // One save / restore of the immediate context for a batch; a single scene
+    // keeps its own inside Render, as before.
+    Result result = Result::Success;
+    {
+        std::optional<DX11StateGuard> batchGuard;
+        const bool batched = scenes.size() > 1;
+        if (batched) batchGuard.emplace(scenes[0]->GetDeviceContext());
+        for (size_t i = 0; i < scenes.size(); ++i) {
+            const auto t0 = Clock::now();
+            const Result r = scenes[i]->Render(!batched);
+            stats[i].renderMs = ms(Clock::now() - t0);
+            if (Failed(r) && !Failed(result)) result = r;
+        }
+    }
+    const bool healthy = CheckDeviceHealth(where);
+
+    const uint32_t serial = ++renderCallSerial_;
+    const float callMs = ms(Clock::now() - callStart);
+    for (size_t i = 0; i < scenes.size(); ++i) {
+        stats[i].callSerial = serial;
+        stats[i].scenesInCall = static_cast<uint32_t>(scenes.size());
+        stats[i].callPrepMs = callPrepMs;
+        stats[i].callMs = callMs;
+        scenes[i]->SetLastRenderStats(stats[i]);
+    }
+    return healthy ? result : Result::DeviceLost;
 }
 
 void SceneManager::RequestRender(SceneHandle scene) {
@@ -680,6 +754,31 @@ Result SceneManager::RenderToTexture(SceneHandle scene) {
     auto* s = GetScene(scene);
     if (!s) return Result::InvalidHandle;
     return GuardedRender(s, "RenderToTexture");
+}
+
+Result SceneManager::RenderToTextures(const SceneHandle* scenes, uint32_t count) {
+    if (!scenes || count == 0) return Result::InvalidHandle;
+    Result missing = Result::Success;
+    std::vector<RenderScene*> list;
+    list.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        auto* s = GetScene(scenes[i]);
+        if (!s) {
+            missing = Result::InvalidHandle;
+            continue;
+        }
+        if (std::find(list.begin(), list.end(), s) == list.end()) list.push_back(s);
+    }
+    if (list.empty()) return missing;
+    const Result result = GuardedRenderBatch(list, "RenderToTextures");
+    return Failed(result) ? result : missing;
+}
+
+bool SceneManager::GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out) {
+    auto* s = GetScene(scene);
+    if (!s) return false;
+    out = s->GetLastRenderStats();
+    return true;
 }
 
 bool SceneManager::GetSceneTexture(SceneHandle scene, SceneTextureInfo& out) {

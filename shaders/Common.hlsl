@@ -52,6 +52,7 @@ cbuffer PerFrame : register(b0) {
     float4   light2Color;
     float4   ambientUp;       // rgb = sky hemisphere color, a = intensity
     float4   ambientDown;     // rgb = ground hemisphere color
+    float4   toneMap;         // x = exposure (<= 0: 1), y = Reinhard white point (<= 0: hard clip)
 };
 
 // ── Per-mesh constant buffer (b1) ───────────────────────────────────────────

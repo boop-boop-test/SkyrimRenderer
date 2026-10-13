@@ -166,7 +166,22 @@ public:
     void SetHeadDriveFlags(uint32_t flags);
     /// Upload every driven array that changed since the last call. Run before
     /// each render of this actor's scene (SceneManager does it). Main thread.
+    /// Serial form of LockDrivenHead + PrepareDrivenShape (each) + CommitDrivenHead.
     void FlushDrivenHead();
+
+    /// Split flush, for preparing many shapes (and heads) in parallel. Hold the
+    /// returned lock across Prepare and Commit.
+    std::unique_lock<std::mutex> LockDrivenHead() { return std::unique_lock(mutex_); }
+    /// Driven shapes of this head (lock held).
+    uint32_t DrivenShapeCount() const { return static_cast<uint32_t>(drivenShapes_.size()); }
+    /// CPU part for one shape: change check, rest + offset, normals, the GPU
+    /// vertex image into the shape's own staging. Lock held by the caller; safe
+    /// to run for different shapes on different threads at once (no D3D, no
+    /// game objects). Returns the vertices staged, 0 when unchanged.
+    uint32_t PrepareDrivenShape(uint32_t shape);
+    /// Upload the staged shapes (D3D, the thread that renders). Lock held.
+    /// Returns the shapes uploaded.
+    uint32_t CommitDrivenHead();
 
     // ── Camera Presets ──────────────────────────────────────────────────────
 
@@ -207,8 +222,9 @@ private:
     void BuildDrivenHead(const std::unordered_map<std::string, RE::BGSHeadPart*>& partsByMesh);
 
     // Re-upload a mesh's bindPoseVertices to its GPU vertex buffer (dynamic
-    // buffer created on first use, Map/WRITE_DISCARD afterwards).
-    bool UploadMeshBindPose(uint32_t meshIndex);
+    // buffer created on first use, Map/WRITE_DISCARD afterwards). skinned: the
+    // GPU-skinned vertex image when the caller already built it.
+    bool UploadMeshBindPose(uint32_t meshIndex, const uint8_t* skinned = nullptr);
 
     // Attach an armor addon NIF to the skeleton (scene graph)
     Result AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARMA* armorAddon);
@@ -315,6 +331,8 @@ private:
         std::vector<float> uploaded;       // absolute positions last sent to the GPU
         std::vector<float> restNormals;    // xyz per vertex, as loaded
         std::vector<float> restTangents;   // xyzw per vertex, as loaded
+        std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
+        bool pending = false;              // prepared, not yet uploaded
     };
     std::vector<DrivenShape> drivenShapes_;
     uint32_t headDriveFlags_ = 0;
