@@ -23,6 +23,8 @@ struct PerFrameData {
         float dx, dy, dz, intensity, r, g, b;
     } lights[3];
     AmbientConfig ambient;
+    float toneExposure = 1.0f;     // <= 0 in the shader means 1
+    float toneWhitePoint = 0.0f;   // Reinhard white point; 0 = hard clip
 };
 
 /// Per-mesh constant data (material properties). Mapped per draw call.

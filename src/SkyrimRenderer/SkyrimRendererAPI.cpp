@@ -701,3 +701,44 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRe
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags) {
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
 }
+
+// --- API v9: batched render, render stats, tone mapping ---------------------
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count) {
+    if (!scenes || count == 0) return FromResult(Result::InvalidHandle);
+    std::vector<SceneHandle> handles(count);
+    for (uint32_t i = 0; i < count; ++i) handles[i] = ToScene(scenes[i]);
+    return FromResult(SceneManager::GetInstance().RenderToTextures(handles.data(), count));
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetLastRenderStats(uint32_t scene, SkyrimRenderer_RenderStats* out) {
+    if (!out || out->structSize < sizeof(SkyrimRenderer_RenderStats)) return 0;
+    RenderScene::RenderStats st;
+    if (!SceneManager::GetInstance().GetLastRenderStats(ToScene(scene), st)) return 0;
+    const uint32_t structSize = out->structSize;
+    std::memset(out, 0, sizeof(SkyrimRenderer_RenderStats));
+    out->structSize = structSize;
+    out->callSerial = st.callSerial;
+    out->scenesInCall = st.scenesInCall;
+    out->shapesUploaded = st.shapesUploaded;
+    out->verticesUploaded = st.verticesUploaded;
+    out->prepCpuMs = st.prepCpuMs;
+    out->uploadMs = st.uploadMs;
+    out->renderMs = st.renderMs;
+    out->callPrepMs = st.callPrepMs;
+    out->callMs = st.callMs;
+    return 1;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float exposure, float whitePoint) {
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetToneMapping(exposure, whitePoint);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    float exposure = 0.0f, whitePoint = 0.0f;
+    if (rs) rs->GetToneMapping(exposure, whitePoint);
+    if (out_exposure) *out_exposure = exposure;
+    if (out_whitePoint) *out_whitePoint = whitePoint;
+    return rs ? 1 : 0;
+}

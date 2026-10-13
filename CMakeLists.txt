@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.7.0
+    VERSION 1.8.0
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 
@@ -102,6 +102,7 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/SplineDecompressor.cpp
     src/SkyrimRenderer/SkyPatcherService.cpp
     src/SkyrimRenderer/SkyrimRendererAPI.cpp
+    src/SkyrimRenderer/WorkerPool.cpp
 )
 
 # Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at

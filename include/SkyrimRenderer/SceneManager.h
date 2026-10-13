@@ -90,6 +90,17 @@ public:
     /// device has been removed.
     Result RenderToTexture(SceneHandle scene);
 
+    /// RenderToTexture for several scenes in one call: the driven heads of every
+    /// listed scene are prepared in parallel, then each scene uploads and draws
+    /// on the calling thread in list order, with its own camera and target,
+    /// inside one save / restore of the immediate context. The same pixels as
+    /// one RenderToTexture per scene. Duplicates render once. Returns the first
+    /// failure (every valid scene still renders), Success otherwise.
+    Result RenderToTextures(const SceneHandle* scenes, uint32_t count);
+
+    /// Timings of a scene's last render; false for an unknown scene.
+    bool GetLastRenderStats(SceneHandle scene, RenderScene::RenderStats& out);
+
     struct SceneTextureInfo {
         ID3D11ShaderResourceView* srv = nullptr;   // UNORM view, one mip, sRGB-encoded
         ID3D11Texture2D* texture = nullptr;        // engine-device R8G8B8A8_TYPELESS texture
@@ -369,6 +380,12 @@ private:
     /// Render with the device-lost guard: refuses after a loss, checks
     /// GetDeviceRemovedReason afterwards and latches the loss.
     Result GuardedRender(RenderScene* scene, const char* where);
+
+    /// GuardedRender for several scenes (see RenderToTextures). Every render
+    /// path goes through it, so each records RenderScene::RenderStats.
+    Result GuardedRenderBatch(const std::vector<RenderScene*>& scenes, const char* where);
+
+    std::atomic<uint32_t> renderCallSerial_{0};  // RenderStats::callSerial
 
     /// Poll GetDeviceRemovedReason on the engine device. Returns false (and
     /// latches deviceLost_) when the device is gone.

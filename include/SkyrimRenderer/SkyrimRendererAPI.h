@@ -119,7 +119,11 @@ extern "C" {
 //   8 - per-mod state (build 1.7.0): callbacks are per calling mod and every
 //       mod's runs; Shutdown releases only the caller's scenes, actors,
 //       overlays and callbacks. No new calls; same signatures.
-#define SKYRIMRENDERER_API_VERSION 8
+//   9 - build 1.8.0: RenderToTextures (several scenes per call, driven-head
+//       vertex prep in parallel), GetLastRenderStats, Set/GetToneMapping
+//       (vanilla-style Reinhard tone mapping, on by default from 1.8.0);
+//       driven-head arrays may be written from any thread (see API v4).
+#define SKYRIMRENDERER_API_VERSION 9
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -449,8 +453,13 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor);
 //   restPositions:  the loaded positions, read-only.
 //
 // Pointers stay valid until DestroyActorPreview. A head preview never rebuilds
-// itself (Equip* / RebuildWithCurrentOutfit are refused on it). Game main
-// thread only: write the arrays on the thread that renders.
+// itself (Equip* / RebuildWithCurrentOutfit are refused on it). The other calls
+// here are game main thread only. Before API 9: write the arrays on the thread
+// that renders. From API 9 any thread may write them, as long as the write
+// finishes before the render that should show it starts (e.g. the workers are
+// joined before RenderToTexture(s) is called), no render of that actor's scene
+// runs while writing, and SetHeadDriveFlags / DestroyActorPreview are not
+// called concurrently.
 //
 // Pose (API v6): the shapes are skinned on the race skeleton NIF's bind pose,
 // so a head is drawn where the camera presets frame it whatever space its NIF
@@ -533,5 +542,57 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRe
 // SKYRIMRENDERER_HEAD_DRIVE_* for every shape of a head actor. Changing
 // OFFSETS resets every positions[] array (to rest, or to zeros).
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags);
+
+// ===========================================================================
+// API v9: batched render, render stats, tone mapping
+// (gate on SkyrimRenderer_GetAPIVersion() >= 9)
+// ===========================================================================
+
+// RenderToTexture for several scenes in one call (texture-mode rules: game
+// main thread, inside the frame). Each scene keeps its own camera, lights and
+// render target, so every texture holds exactly what RenderToTexture(scene)
+// would draw. What the batch shares: the driven-head vertex prep of all listed
+// scenes runs in parallel on the renderer's worker pool (per changed shape:
+// rest + offset, normals, the GPU vertex image), and the immediate context is
+// saved and restored once around all the draws. Uploads and draws stay on the
+// calling thread, in list order. Duplicate handles render once.
+// Returns a Result: 0 when every scene rendered; otherwise the first failure
+// (an invalid handle is skipped and reported as InvalidHandle, 9 = DeviceLost).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_RenderToTextures(const uint32_t* scenes, uint32_t count);
+
+// Timings of a scene's last render, from any render path (RenderToTexture,
+// RenderToTextures, RequestRender, ...). CPU milliseconds on the calling
+// thread unless noted.
+struct SkyrimRenderer_RenderStats {
+    uint32_t structSize;         // in: sizeof(SkyrimRenderer_RenderStats)
+    uint32_t callSerial;         // increases per render call; equal for scenes of one batch
+    uint32_t scenesInCall;       // 1 for RenderToTexture
+    uint32_t shapesUploaded;     // driven-head shapes uploaded for this scene
+    uint32_t verticesUploaded;
+    float    prepCpuMs;          // this scene's driven-head prep, summed over threads
+    float    uploadMs;           // this scene's vertex buffer uploads
+    float    renderMs;           // this scene's draw: camera, accumulator, draws
+    float    callPrepMs;         // the call's parallel prep, wall time (shared by its scenes)
+    float    callMs;             // the whole call, wall time (shared by its scenes)
+};
+
+// Fill out (out->structSize must be set). Returns 1, or 0 for an unknown scene
+// or a too-small struct. All zeros before the scene's first render.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetLastRenderStats(uint32_t scene, SkyrimRenderer_RenderStats* out);
+
+// Tone mapping of the built-in preview shaders (not the Community Shaders
+// path), per scene. Like the game's HDR pass: the lit colour is scaled by
+// exposure, then compressed with vanilla's Reinhard curve on luminance
+// (x * (1 + x / white^2) / (1 + x), hue kept) so bright skin and highlights
+// roll off instead of clipping to flat white. The game adapts exposure to the
+// scene; a preview has no scene to adapt to, so it is a setting.
+//   exposure:   > 0, default 1.4 (<= 0 resets to 1).
+//   whitePoint: exposed brightness that maps to white, default 3.0. 0 turns
+//               the curve off: exposure, then a hard clip; (1, 0) is the
+//               output of builds before 1.8.0.
+SKYRIMRENDERER_API void SkyrimRenderer_SetToneMapping(uint32_t scene, float exposure, float whitePoint);
+
+// Any out pointer may be NULL. Returns 1/0.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetToneMapping(uint32_t scene, float* out_exposure, float* out_whitePoint);
 
 } // extern "C"

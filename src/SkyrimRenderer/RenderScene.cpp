@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <future>
+#include <optional>
 #include <thread>
 
 #include <RE/Skyrim.h>
@@ -166,6 +167,8 @@ RenderScene::RenderScene(RenderScene&& other) noexcept {
     ambient_ = other.ambient_;
     backgroundColor_ = other.backgroundColor_;
     enbMode_ = other.enbMode_;
+    toneExposure_ = other.toneExposure_;
+    toneWhitePoint_ = other.toneWhitePoint_;
     loadedMeshes_ = std::move(other.loadedMeshes_);
     gpuSkinningPose_ = other.gpuSkinningPose_;
     other.gpuSkinningPose_ = nullptr;
@@ -207,6 +210,8 @@ RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
         ambient_ = other.ambient_;
         backgroundColor_ = other.backgroundColor_;
         enbMode_ = other.enbMode_;
+        toneExposure_ = other.toneExposure_;
+        toneWhitePoint_ = other.toneWhitePoint_;
         loadedMeshes_ = std::move(other.loadedMeshes_);
         gpuSkinningPose_ = other.gpuSkinningPose_;
         other.gpuSkinningPose_ = nullptr;
@@ -955,14 +960,37 @@ PerFrameData RenderScene::BuildPerFrameData() {
     }
 
     frame.ambient = ambient_;
+    frame.toneExposure = toneExposure_;
+    frame.toneWhitePoint = toneWhitePoint_;
     return frame;
+}
+
+void RenderScene::SetToneMapping(float exposure, float whitePoint) {
+    std::lock_guard lock(mutex_);
+    toneExposure_ = exposure > 0.0f ? exposure : 1.0f;
+    toneWhitePoint_ = whitePoint > 0.0f ? whitePoint : 0.0f;
+}
+
+void RenderScene::GetToneMapping(float& exposure, float& whitePoint) const {
+    exposure = toneExposure_;
+    whitePoint = toneWhitePoint_;
+}
+
+void RenderScene::SetLastRenderStats(const RenderStats& stats) {
+    std::lock_guard lock(statsMutex_);
+    lastStats_ = stats;
+}
+
+RenderScene::RenderStats RenderScene::GetLastRenderStats() const {
+    std::lock_guard lock(statsMutex_);
+    return lastStats_;
 }
 
 // ============================================================================
 // Rendering
 // ============================================================================
 
-Result RenderScene::Render() {
+Result RenderScene::Render(bool saveState) {
     std::lock_guard lock(mutex_);
 
     if (!device_ || !context_ || !renderTarget_.IsValid() || !sceneRoot_) {
@@ -989,7 +1017,9 @@ Result RenderScene::Render() {
     camera_.Update();
 
     // ── Save state (RAII) ────────────────────────────────────────────────
-    DX11StateGuard dxGuard(context_);
+    // A batch render holds one guard over all its scenes instead.
+    std::optional<DX11StateGuard> dxGuard;
+    if (saveState) dxGuard.emplace(context_);
 
     // Save camera state
     auto savedLocalTranslate = gameCamera->local.translate;

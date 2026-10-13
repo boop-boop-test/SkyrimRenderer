@@ -1553,7 +1553,7 @@ static void RecomputeNormals(LoadedMesh& mesh) {
     }
 }
 
-bool ActorPreview::UploadMeshBindPose(uint32_t meshIndex) {
+bool ActorPreview::UploadMeshBindPose(uint32_t meshIndex, const uint8_t* skinned) {
     auto& allMeshes = scene_.GetLoadedMeshesMut();
     if (meshIndex >= allMeshes.size()) return false;
     auto& mesh = allMeshes[meshIndex];
@@ -1562,9 +1562,13 @@ bool ActorPreview::UploadMeshBindPose(uint32_t meshIndex) {
     auto* device = scene_.GetDevice();
     if (device && mesh.isGPUSkinned) {
         const UINT byteWidth = static_cast<UINT>(mesh.vertexCount * sizeof(SkinnedVertex));
-        uploadScratch_.resize(byteWidth);
-        auto* verts = reinterpret_cast<SkinnedVertex*>(uploadScratch_.data());
-        FillSkinnedVertices(mesh, verts);
+        const SkinnedVertex* verts = reinterpret_cast<const SkinnedVertex*>(skinned);
+        if (!verts) {
+            uploadScratch_.resize(byteWidth);
+            auto* filled = reinterpret_cast<SkinnedVertex*>(uploadScratch_.data());
+            FillSkinnedVertices(mesh, filled);
+            verts = filled;
+        }
 
         // The loader's VB is immutable. The first upload replaces it with a
         // dynamic one so later uploads are a Map/WRITE_DISCARD, not a buffer
@@ -1834,46 +1838,67 @@ void ActorPreview::SetHeadDriveFlags(uint32_t flags) {
 }
 
 void ActorPreview::FlushDrivenHead() {
-    std::lock_guard lock(mutex_);
-    if (drivenShapes_.empty()) return;
+    auto lock = LockDrivenHead();
+    for (uint32_t s = 0; s < DrivenShapeCount(); ++s) PrepareDrivenShape(s);
+    CommitDrivenHead();
+}
+
+uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
+    if (shape >= drivenShapes_.size()) return 0;
+    auto& ds = drivenShapes_[shape];
+    ds.pending = false;
     auto& meshes = scene_.GetLoadedMeshesMut();
+    if (ds.meshIndex >= meshes.size()) return 0;
+    auto& mesh = meshes[ds.meshIndex];
+    const size_t count = ds.rest.size();
+    if (mesh.bindPoseVertices.size() * 3 != count || ds.positions.size() != count) return 0;
     const bool offsets = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) != 0;
     const bool recompute = (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_RECOMPUTE_NORMALS) != 0;
 
-    for (auto& ds : drivenShapes_) {
-        if (ds.meshIndex >= meshes.size()) continue;
-        auto& mesh = meshes[ds.meshIndex];
-        const size_t count = ds.rest.size();
-        if (mesh.bindPoseVertices.size() * 3 != count || ds.positions.size() != count) continue;
-
-        bool changed = headDriveDirty_;
-        if (!changed) {
-            if (offsets) {
-                for (size_t k = 0; k < count; ++k) {
-                    if (ds.rest[k] + ds.positions[k] != ds.uploaded[k]) { changed = true; break; }
-                }
-            } else {
-                changed = std::memcmp(ds.positions.data(), ds.uploaded.data(), count * sizeof(float)) != 0;
+    bool changed = headDriveDirty_;
+    if (!changed) {
+        if (offsets) {
+            for (size_t k = 0; k < count; ++k) {
+                if (ds.rest[k] + ds.positions[k] != ds.uploaded[k]) { changed = true; break; }
             }
+        } else {
+            changed = std::memcmp(ds.positions.data(), ds.uploaded.data(), count * sizeof(float)) != 0;
         }
-        if (!changed) continue;
+    }
+    if (!changed) return 0;
 
-        for (size_t k = 0; k < count; ++k) {
-            ds.uploaded[k] = offsets ? ds.rest[k] + ds.positions[k] : ds.positions[k];
-        }
-        const size_t n = mesh.bindPoseVertices.size();
-        for (size_t v = 0; v < n; ++v) {
-            auto& bp = mesh.bindPoseVertices[v];
-            std::memcpy(bp.position, &ds.uploaded[v * 3], 3 * sizeof(float));
-            // Start from the NIF's frame every time: the recompute votes its
-            // winding against these normals, and OFF must mean untouched.
-            std::memcpy(bp.normal, &ds.restNormals[v * 3], 3 * sizeof(float));
-            std::memcpy(bp.tangent, &ds.restTangents[v * 4], 4 * sizeof(float));
-        }
-        if (recompute) RecomputeNormals(mesh);
-        UploadMeshBindPose(ds.meshIndex);
+    for (size_t k = 0; k < count; ++k) {
+        ds.uploaded[k] = offsets ? ds.rest[k] + ds.positions[k] : ds.positions[k];
+    }
+    const size_t n = mesh.bindPoseVertices.size();
+    for (size_t v = 0; v < n; ++v) {
+        auto& bp = mesh.bindPoseVertices[v];
+        std::memcpy(bp.position, &ds.uploaded[v * 3], 3 * sizeof(float));
+        // Start from the NIF's frame every time: the recompute votes its
+        // winding against these normals, and OFF must mean untouched.
+        std::memcpy(bp.normal, &ds.restNormals[v * 3], 3 * sizeof(float));
+        std::memcpy(bp.tangent, &ds.restTangents[v * 4], 4 * sizeof(float));
+    }
+    if (recompute) RecomputeNormals(mesh);
+    if (mesh.isGPUSkinned && mesh.vertexCount == n) {
+        ds.staged.resize(n * sizeof(SkinnedVertex));
+        FillSkinnedVertices(mesh, reinterpret_cast<SkinnedVertex*>(ds.staged.data()));
+    } else {
+        ds.staged.clear();
+    }
+    ds.pending = true;
+    return static_cast<uint32_t>(n);
+}
+
+uint32_t ActorPreview::CommitDrivenHead() {
+    uint32_t uploaded = 0;
+    for (auto& ds : drivenShapes_) {
+        if (!ds.pending) continue;
+        ds.pending = false;
+        if (UploadMeshBindPose(ds.meshIndex, ds.staged.empty() ? nullptr : ds.staged.data())) ++uploaded;
     }
     headDriveDirty_ = false;
+    return uploaded;
 }
 
 // ============================================================================
