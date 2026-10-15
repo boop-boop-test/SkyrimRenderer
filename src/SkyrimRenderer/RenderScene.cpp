@@ -299,6 +299,7 @@ RE::NiNode* RenderScene::GetSceneRoot() const {
 void RenderScene::SetCamera(float yaw, float pitch, float distance, float focalHeight) {
     std::lock_guard lock(mutex_);
     activePreset_.reset();
+    pointsFrame_.reset();
     camera_.SetOrbit(yaw, pitch, distance, focalHeight);
 }
 
@@ -306,12 +307,14 @@ void RenderScene::SetFOV(float fovDegrees) {
     std::lock_guard lock(mutex_);
     camera_.SetFOV(fovDegrees);
     if (activePreset_) ApplyPresetLocked(*activePreset_);
+    if (pointsFrame_) ApplyPointsLocked();
 }
 
 void RenderScene::SetFramingScale(float scale) {
     std::lock_guard lock(mutex_);
     camera_.SetFramingScale(scale);
     if (activePreset_) ApplyPresetLocked(*activePreset_);
+    if (pointsFrame_) ApplyPointsLocked();
 }
 
 float RenderScene::GetFramingScale() const { return camera_.GetFramingScale(); }
@@ -329,12 +332,82 @@ void RenderScene::RestoreActivePreset(std::optional<CameraPreset> preset) {
 void RenderScene::SetCameraPreset(CameraPreset preset) {
     std::lock_guard lock(mutex_);
     activePreset_ = preset;
+    pointsFrame_.reset();
     ApplyPresetLocked(preset);
+}
+
+float RenderScene::AspectLocked() const {
+    const auto w = renderTarget_.GetWidth(), h = renderTarget_.GetHeight();
+    return w && h ? static_cast<float>(w) / static_cast<float>(h) : 1.0f;
+}
+
+bool RenderScene::ApplyPointsLocked(PointsResult* result) {
+    PointsResult scratch;
+    return camera_.FrameToPoints(*pointsFrame_, AspectLocked(), result ? *result : scratch);
+}
+
+bool RenderScene::FrameToPoints(PointsTarget target, uint32_t space, PointsResult& result) {
+    std::lock_guard lock(mutex_);
+    if (space > 1) return false;
+    if (space == 1) {
+        // Bind-pose model space -> as drawn: the head bone's pose relative to
+        // its bind transform (identity without a pose or a head bone).
+        BoneTransform carry = BoneTransform::Identity();
+        if (hasHeadBone_ && gpuSkinningPose_) {
+            if (auto it = gpuSkinningPose_->find("NPC Head [Head]"); it != gpuSkinningPose_->end()) {
+                carry = it->second.Compose(headBoneBind_.Inverse());
+            }
+        }
+        for (auto& p : target.points) {
+            const float in[3] = {p.x, p.y, p.z};
+            float out[3];
+            carry.TransformPoint(in, out);
+            p = {out[0], out[1], out[2]};
+        }
+    }
+    const auto saved = std::move(pointsFrame_);
+    pointsFrame_ = std::move(target);
+    if (!ApplyPointsLocked(&result)) {
+        pointsFrame_ = saved;  // camera untouched; the earlier framing stays active
+        return false;
+    }
+    activePreset_.reset();
+    SKSE::log::info("[SkyrimRenderer] FrameToPoints: {} points -> anchor ({:.3f}, {:.3f}), span {:.3f} x {:.3f}{}; "
+                    "distance {:.1f}, focal {:.2f}, yaw {:.1f}, pitch {:.1f}",
+                    pointsFrame_->points.size(), result.anchorX, result.anchorY, result.spanV, result.spanH,
+                    result.spanReached ? "" : " (not reached: too close)", camera_.GetDistance(),
+                    camera_.GetFocalHeight(), camera_.GetYaw(), camera_.GetPitch());
+    return true;
+}
+
+bool RenderScene::GetFaceLandmarks(FacePoints& out, float& eyeLineY, float& faceSpan, std::string* why) {
+    std::lock_guard lock(mutex_);
+    if (!CameraController::MeasureFace(loadedMeshes_, gpuSkinningPose_, out, why)) return false;
+    const float aspect = AspectLocked();
+    float rx, ry, lx, ly, bx, by, cx, cy;
+    const bool seen = camera_.Project(out.eyeRight, aspect, rx, ry) && camera_.Project(out.eyeLeft, aspect, lx, ly) &&
+                      camera_.Project(out.browTop, aspect, bx, by) && camera_.Project(out.chin, aspect, cx, cy);
+    eyeLineY = seen ? (ry + ly) * 0.5f : 0.0f;
+    faceSpan = seen ? cy - by : 0.0f;
+    return true;
 }
 
 void RenderScene::ApplyPresetLocked(CameraPreset preset) {
     camera_.SetPreset(preset, loadedMeshes_, sceneRoot_.get(),
                       hasHeadBone_ ? &headBonePos_ : nullptr, gpuSkinningPose_);
+    // Where a face preset put the face, for comparing framings across heads.
+    if (preset == CameraPreset::FaceClose || preset == CameraPreset::HeadShot ||
+        preset == CameraPreset::HeadShotLoose) {
+        FacePoints f;
+        if (!CameraController::MeasureFace(loadedMeshes_, gpuSkinningPose_, f)) return;
+        const float aspect = AspectLocked();
+        float rx, ry, lx, ly, bx, by, cx, cy;
+        if (camera_.Project(f.eyeRight, aspect, rx, ry) && camera_.Project(f.eyeLeft, aspect, lx, ly) &&
+            camera_.Project(f.browTop, aspect, bx, by) && camera_.Project(f.chin, aspect, cx, cy)) {
+            SKSE::log::info("[SkyrimRenderer] Framing preset {}: eye line {:.3f}, brows-chin {:.3f} of the frame, "
+                            "eyes x {:.3f}", static_cast<int>(preset), (ry + ly) * 0.5f, cy - by, (rx + lx) * 0.5f);
+        }
+    }
 }
 
 float RenderScene::GetCameraYaw() const { return camera_.GetYaw(); }
@@ -345,6 +418,7 @@ float RenderScene::GetCameraFOV() const { return camera_.GetFOV(); }
 void RenderScene::PanCamera(float dx, float dy) {
     std::lock_guard lock(mutex_);
     activePreset_.reset();
+    pointsFrame_.reset();
     camera_.Pan(dx, dy);
 }
 
@@ -603,6 +677,7 @@ uint32_t RenderScene::LoadNifMesh(const std::string& meshPath, MeshTag tag,
             if (idx >= 0) {
                 const auto& t = skel.bones[idx].globalTransform.translation;
                 headBonePos_ = {t[0], t[1], t[2]};
+                headBoneBind_ = skel.bones[idx].globalTransform;
                 hasHeadBone_ = true;
             }
         }

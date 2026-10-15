@@ -1142,6 +1142,83 @@ SKYRIMRENDERER_API float SkyrimRenderer_GetFieldOfView(uint32_t scene);  // 0 fo
 SKYRIMRENDERER_API void  SkyrimRenderer_SetFramingScale(uint32_t scene, float scale);
 SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene);  // 0 for an unknown scene
 
+// ---- Framing to points ----
+// Frame any set of points the same way every time, whatever the subject's
+// size and shape: e.g. a face's eyes at 42% of the frame height with brows to
+// chin filling 55%, for every race, head mod and hair. The renderer solves the
+// camera distance, focal height and orbit centre for the scene's FOV and
+// render target aspect (exact perspective, not a fit to a box).
+//
+// Frame fractions run from the top left (0, 0) to the bottom right (1, 1).
+// Scene space is the preview's model space: +Y forward (where the actor
+// faces), +Z up, +X the actor's right (on the image's left at yaw 0).
+enum {
+    SKYRIMRENDERER_POINTS_SCENE = 0,     // as drawn (under the current pose)
+    SKYRIMRENDERER_POINTS_HEAD_BIND = 1, // bind-pose model space, carried by NPC Head [Head]'s current pose
+};
+enum {
+    SKYRIMRENDERER_SPAN_VERTICAL = 0,
+    SKYRIMRENDERER_SPAN_HORIZONTAL = 1,
+    SKYRIMRENDERER_SPAN_LARGER = 2,      // fit both: whichever extent is larger
+};
+enum { SKYRIMRENDERER_FRAME_SET_ANGLES = 1 };  // use yaw / pitch below (else keep the camera's)
+
+typedef struct SkyrimRenderer_FrameTarget {
+    uint32_t structSize;
+    uint32_t anchorMask;    // bit i = point i; these points' mean is the anchor (0 = all points)
+    float anchorX, anchorY; // where the anchor lands (frame fractions)
+    uint32_t spanMask;      // points whose extent is fitted (0 = all)
+    uint32_t spanAxis;      // SKYRIMRENDERER_SPAN_*
+    float span;             // that extent: fraction of the frame height (vertical) or width (horizontal)
+    uint32_t flags;         // SKYRIMRENDERER_FRAME_*
+    float yaw, pitch;       // degrees, with SKYRIMRENDERER_FRAME_SET_ANGLES
+} SkyrimRenderer_FrameTarget;
+
+typedef struct SkyrimRenderer_FrameResult {
+    uint32_t structSize;
+    float yaw, pitch, distance, focalHeight;  // the camera now (as SetCamera takes them)
+    float anchorX, anchorY;                   // where the anchor landed
+    float spanV, spanH;                       // the span points' extent, frame fractions
+    int32_t spanReached;                      // 0: the camera could not get close enough
+} SkyrimRenderer_FrameResult;
+
+// Frames up to 32 points (xyz triples). The span is divided by the scene's
+// framing scale (above 1 = more room). Call after SetPose / animation so the
+// points are where they are drawn (or pass HEAD_BIND points and the head
+// bone's pose carries them). The framing stays active like a preset: a later
+// SetFieldOfView / SetFramingScale solves it again; SetCamera, PanCamera and
+// SetCameraPreset end it. out (optional) gets what was achieved. Returns a
+// Result: 0, 2 (InvalidHandle) for an unknown scene, 6 (InvalidParameter)
+// for no points, a span of zero extent or non-finite input (camera untouched).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_FrameToPoints(uint32_t scene, const float* xyz, uint32_t count,
+                                                         uint32_t space, const SkyrimRenderer_FrameTarget* target,
+                                                         SkyrimRenderer_FrameResult* out);
+
+// The scene's FaceGen head, measured where it is drawn: the same landmarks
+// FaceClose frames, ready for FrameToPoints. The five points are contiguous
+// (browTop .. chin, 15 floats): pass &browTop[0] with count 5, anchorMask
+// 0x6 (the eyes), spanMask 0x11 (brows to chin).
+enum {
+    SKYRIMRENDERER_FACE_BROW_SHAPE = 1,  // brow top from a brow shape (else estimated from the eyes)
+    SKYRIMRENDERER_FACE_CHIN_MESH = 2,   // chin from the posed face vertices (else from the mouth)
+    SKYRIMRENDERER_FACE_EYES_SPLIT = 4,  // eye centres from their vertices (else from the eye box)
+    SKYRIMRENDERER_FACE_POSED = 8,       // measured under the scene's pose (else load-time bounds)
+};
+typedef struct SkyrimRenderer_FaceLandmarks {
+    uint32_t structSize;
+    uint32_t flags;          // SKYRIMRENDERER_FACE_*
+    float browTop[3];        // top of the brows, between the eyes
+    float eyeRight[3];       // the actor's right eye (+X)
+    float eyeLeft[3];
+    float mouth[3];
+    float chin[3];           // lowest point of the chin, at its front
+    float eyeLineY;          // the current camera: eye line height (frame fraction)
+    float faceSpan;          // the current camera: brows to chin (fraction of the frame height)
+} SkyrimRenderer_FaceLandmarks;
+// Returns 1, or 0 without a FaceGen face, eyes and a mouth (helmets,
+// creatures), for an unknown scene or a too-small structSize.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetFaceLandmarks(uint32_t scene, SkyrimRenderer_FaceLandmarks* out);
+
 // ---- Prep workers ----
 // Driven-head vertex prep runs on a small worker pool plus the calling thread
 // (see RenderToTextures). Process-wide tuning, shared by every mod: cap the

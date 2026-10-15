@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <string>
 
 namespace SkyrimRenderer {
@@ -263,11 +264,12 @@ void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, cons
     SetOrbit(0.0f, 0.0f, fit + depth * 0.5f, (bottom + top) * 0.5f);
 }
 
-bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, const BonePoseMap* pose) {
-    // Brows to chin fill the frame, centred on the face. Everything is
-    // measured on the head as drawn: under the scene's pose when every part
-    // has GPU-skinned CPU data (so an idle set before this call is framed
-    // where it puts the head), else on the load-time bounds (bind pose).
+bool CameraController::MeasureFace(const std::vector<LoadedMesh>& meshes, const BonePoseMap* pose, FacePoints& out,
+                                   std::string* why) {
+    // Everything is measured on the head as drawn: under the scene's pose
+    // when every part has GPU-skinned CPU data (so an idle set before this
+    // call is measured where it puts the head), else on the load-time bounds
+    // (bind pose).
     //
     // Proportions, measured on 1165 FaceGen heads (Skyrim, DLC and Creation
     // Club NPCs, every race incl. children) and used only where the mesh
@@ -282,9 +284,10 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     // The lowest quarter of the face shape below the mouth is neck (the neck
     // seam to the chin is far more than that on every measured head).
     constexpr float kNeckBand = 0.25f;
-    // Frame = 1.3 x brows-to-chin (11.5% above the brows and below the chin).
-    // Against HeadShot that is 1.79x closer (median; p10 1.68, p90 1.93).
-    const float kMargin = 1.3f * framingScale_;
+    auto fail = [&](std::string reason) {
+        if (why) *why = std::move(reason);
+        return false;
+    };
 
     // The parts: the FaceGen-shaded face (the largest such shape), the eyes
     // (eye shader), mouth and brows by head part name (FaceGen NIFs name each
@@ -309,11 +312,7 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
         }
     }
     if (eyes.empty()) eyes = std::move(eyesByName);
-    if (!face || eyes.empty() || !mouth) {
-        SKSE::log::info("[SkyrimRenderer] FaceClose: no {} shape; framing as HeadShot",
-                        !face ? "FaceGen face" : eyes.empty() ? "eye" : "mouth");
-        return false;
-    }
+    if (!face || eyes.empty() || !mouth) return fail(!face ? "no FaceGen face shape" : eyes.empty() ? "no eye shape" : "no mouth shape");
 
     std::vector<const LoadedMesh*> parts = {face, mouth};
     parts.insert(parts.end(), eyes.begin(), eyes.end());
@@ -322,11 +321,13 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     bool posed = pose != nullptr;
     for (size_t i = 0; posed && i < parts.size(); ++i) posed = DrawnPositions(*parts[i], pose, drawn[i]);
 
+    auto indexOf = [&](const LoadedMesh* m) {
+        return static_cast<size_t>(std::find(parts.begin(), parts.end(), m) - parts.begin());
+    };
     auto boxOf = [&](const LoadedMesh* m) {
         Box b;
-        const size_t i = static_cast<size_t>(std::find(parts.begin(), parts.end(), m) - parts.begin());
         if (posed) {
-            for (const auto& p : drawn[i]) b.Add(p.x, p.y, p.z);
+            for (const auto& p : drawn[indexOf(m)]) b.Add(p.x, p.y, p.z);
         } else {
             b.Add(m->boundsMin[0], m->boundsMin[1], m->boundsMin[2]);
             b.Add(m->boundsMax[0], m->boundsMax[1], m->boundsMax[2]);
@@ -343,10 +344,32 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
     const float eyeHeight = eyeBox.max[2] - eyeBox.min[2];
     const float mouthZ = mouthBox.Center(2);
     const float eyeToMouth = eyeZ - mouthZ;
-    if (!faceBox.Valid() || eyeHeight <= 0.0f || eyeToMouth <= 0.0f) {   // not an upright face
-        SKSE::log::info("[SkyrimRenderer] FaceClose: eyes {:.2f} not above mouth {:.2f}; framing as HeadShot",
-                        eyeZ, mouthZ);
-        return false;
+    if (!faceBox.Valid() || eyeHeight <= 0.0f || eyeToMouth <= 0.0f) {
+        return fail(std::format("eyes {:.2f} not above mouth {:.2f}: not an upright face", eyeZ, mouthZ));
+    }
+
+    // Eye centres: the eye vertices on each side of the eyes' middle (one eye
+    // shape usually holds both eyeballs). Without vertices, a quarter of the
+    // eye box in from each side.
+    const float eyeMidX = eyeBox.Center(0);
+    Box right, left;
+    for (const auto* e : eyes) {
+        const size_t i = indexOf(e);
+        const bool haveDrawn = posed && !drawn[i].empty();
+        const size_t n = haveDrawn ? drawn[i].size() : e->bindPoseVertices.size();
+        for (size_t v = 0; v < n; ++v) {
+            const float* q = haveDrawn ? &drawn[i][v].x : e->bindPoseVertices[v].position;
+            (q[0] >= eyeMidX ? right : left).Add(q[0], q[1], q[2]);
+        }
+    }
+    out.eyesSplit = right.Valid() && left.Valid();
+    if (out.eyesSplit) {
+        out.eyeRight = {right.Center(0), right.Center(1), right.Center(2)};
+        out.eyeLeft = {left.Center(0), left.Center(1), left.Center(2)};
+    } else {
+        const float quarter = (eyeBox.max[0] - eyeBox.min[0]) * 0.25f;
+        out.eyeRight = {eyeBox.max[0] - quarter, eyeBox.Center(1), eyeZ};
+        out.eyeLeft = {eyeBox.min[0] + quarter, eyeBox.Center(1), eyeZ};
     }
 
     // Brows: a brow shape centred between the eyes and one eye-to-mouth
@@ -357,15 +380,17 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
         const float z = bb.Center(2);
         if (z > eyeZ && z < eyeZ + eyeToMouth) browBox.Add(bb);
     }
-    const bool browShape = browBox.Valid();
-    const float top = browShape ? browBox.max[2] : eyeTop + kBrowAboveEyeTop * eyeHeight;
+    out.browFromShape = browBox.Valid();
+    out.browTop = out.browFromShape ? RE::NiPoint3{eyeMidX, browBox.max[1], browBox.max[2]}
+                                    : RE::NiPoint3{eyeMidX, eyeBox.max[1], eyeTop + kBrowAboveEyeTop * eyeHeight};
+    out.mouth = {mouthBox.Center(0), mouthBox.max[1], mouthZ};
 
     // Chin: the lowest point of the face in front of the line midway between
     // the chin's front and the neck's front. Below the chin the skin turns
     // back to the throat almost level, so the cut barely depends on where
     // between the two fronts it is drawn. Forward is +Y.
-    float bottom = mouthZ - kChinBelowMouth * eyeToMouth;
-    bool chinFromMesh = false;
+    out.chin = {out.mouth.x, out.mouth.y, mouthZ - kChinBelowMouth * eyeToMouth};
+    out.chinFromMesh = false;
     if (posed) {
         const auto& verts = drawn[0];
         const float neckTop = faceBox.min[2] + (mouthZ - faceBox.min[2]) * kNeckBand;
@@ -376,34 +401,173 @@ bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, con
         }
         if (chinFront > neckFront && neckFront > -1e8f) {
             const float cut = (chinFront + neckFront) * 0.5f;
-            float lowest = mouthZ;
+            const RE::NiPoint3* lowest = nullptr;
             for (const auto& p : verts) {
-                if (p.z < mouthZ && p.y > cut) lowest = std::min(lowest, p.z);
+                if (p.z < mouthZ && p.y > cut && (!lowest || p.z < lowest->z)) lowest = &p;
             }
-            if (lowest < mouthZ) {
-                bottom = lowest;
-                chinFromMesh = true;
+            if (lowest) {
+                out.chin = {out.mouth.x, chinFront, lowest->z};
+                out.chinFromMesh = true;
             }
         }
     }
-    const float height = top - bottom;
-    if (height <= 0.0f) {
-        SKSE::log::info("[SkyrimRenderer] FaceClose: brows {:.2f} not above chin {:.2f}; framing as HeadShot",
-                        top, bottom);
+    if (out.browTop.z <= out.chin.z) {
+        return fail(std::format("brows {:.2f} not above chin {:.2f}", out.browTop.z, out.chin.z));
+    }
+    out.posed = posed;
+    out.eyeMidX = eyeMidX;
+    out.eyeFrontY = eyeBox.max[1];
+    out.faceMidY = faceBox.Center(1);
+    return true;
+}
+
+bool CameraController::FrameFaceClose(const std::vector<LoadedMesh>& meshes, const BonePoseMap* pose) {
+    // Brows to chin fill the frame, centred on the face (MeasureFace).
+    // Frame = 1.3 x brows-to-chin (11.5% above the brows and below the chin).
+    // Against HeadShot that is 1.79x closer (median; p10 1.68, p90 1.93).
+    const float kMargin = 1.3f * framingScale_;
+    FacePoints f;
+    std::string why;
+    if (!MeasureFace(meshes, pose, f, &why)) {
+        SKSE::log::info("[SkyrimRenderer] FaceClose: {}; framing as HeadShot", why);
         return false;
     }
+    const float top = f.browTop.z, bottom = f.chin.z;
+    const float height = top - bottom;
 
     // Fitted at the front of the eyes, the plane the brows and chin sit near.
     const float tanHalf = std::tan(fov_ * 0.5f * kDegToRadF);
     const float fit = height * 0.5f * kMargin / std::max(tanHalf, 0.01f);
-    orbitCenterX_ = eyeBox.Center(0);
-    orbitCenterY_ = faceBox.Center(1);
-    SetOrbit(0.0f, 0.0f, fit + (eyeBox.max[1] - orbitCenterY_), (top + bottom) * 0.5f);
+    orbitCenterX_ = f.eyeMidX;
+    orbitCenterY_ = f.faceMidY;
+    SetOrbit(0.0f, 0.0f, fit + (f.eyeFrontY - orbitCenterY_), (top + bottom) * 0.5f);
 
     SKSE::log::info("[SkyrimRenderer] FaceClose: brows {:.2f} ({}), chin {:.2f} ({}), eyes {:.2f}, mouth {:.2f}, "
                     "{} -> distance {:.1f}, focal {:.2f}",
-                    top, browShape ? "brow shape" : "from eyes", bottom, chinFromMesh ? "face mesh" : "from mouth",
-                    eyeZ, mouthZ, posed ? "posed" : "load bounds", distance_, focalHeight_);
+                    top, f.browFromShape ? "brow shape" : "from eyes", bottom, f.chinFromMesh ? "face mesh" : "from mouth",
+                    (f.eyeRight.z + f.eyeLeft.z) * 0.5f, f.mouth.z, f.posed ? "posed" : "load bounds", distance_,
+                    focalHeight_);
+    return true;
+}
+
+bool CameraController::FrameToPoints(const PointsTarget& t, float aspect, PointsResult& result) {
+    const size_t n = std::min<size_t>(t.points.size(), 32);
+    if (n == 0 || !(aspect > 0.0f) || !std::isfinite(t.span) || t.span <= 0.0f || !std::isfinite(t.anchorX) ||
+        !std::isfinite(t.anchorY)) {
+        return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const auto& p = t.points[i];
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+    }
+    auto in = [](uint32_t mask, size_t i) { return mask == 0 || ((mask >> i) & 1u); };
+
+    const float yaw = t.setAngles && std::isfinite(t.yaw) ? t.yaw : yaw_;
+    const float pitch = std::clamp(t.setAngles && std::isfinite(t.pitch) ? t.pitch : pitch_, -89.0f, 89.0f);
+    const float cy = std::cos(yaw * kDegToRadF), sy = std::sin(yaw * kDegToRadF);
+    const float cp = std::cos(pitch * kDegToRadF), sp = std::sin(pitch * kDegToRadF);
+    // The camera sits at target + (sinY cosP, cosY cosP, sinP) * distance and
+    // looks back along it, up = +Z (Update / GetView).
+    const RE::NiPoint3 fwd{-sy * cp, -cy * cp, -sp};
+    RE::NiPoint3 right{fwd.y * 1.0f - fwd.z * 0.0f, fwd.z * 0.0f - fwd.x * 1.0f, 0.0f};  // fwd x +Z
+    const float rl = std::sqrt(right.x * right.x + right.y * right.y);
+    if (rl < 1e-6f) return false;
+    right = {right.x / rl, right.y / rl, 0.0f};
+    const RE::NiPoint3 up{right.y * fwd.z - right.z * fwd.y, right.z * fwd.x - right.x * fwd.z,
+                          right.x * fwd.y - right.y * fwd.x};  // right x fwd
+
+    // Anchor A; every point in the camera's basis relative to it.
+    RE::NiPoint3 anchor{0, 0, 0};
+    float count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!in(t.anchorMask, i)) continue;
+        anchor += t.points[i];
+        count += 1;
+    }
+    if (count == 0) return false;
+    anchor = anchor / count;
+    struct Q { float a, b, c; bool span; };
+    std::vector<Q> q(n);
+    float nearest = -1e9f;
+    for (size_t i = 0; i < n; ++i) {
+        const RE::NiPoint3 d = t.points[i] - anchor;
+        q[i] = {d.Dot(right), d.Dot(up), d.Dot(fwd), in(t.spanMask, i)};
+        nearest = std::max(nearest, -q[i].c);
+    }
+
+    // With the camera D in front of the anchor's plane and shifted (u, v) in
+    // it, the anchor lands at (X, Y) in NDC for u = -X D tan aspect, v = -Y D
+    // tan; the span then only depends on D and shrinks as D grows: bisect.
+    const float tanHalf = std::max(std::tan(fov_ * 0.5f * kDegToRadF), 0.01f);
+    const float X = 2.0f * t.anchorX - 1.0f, Y = 1.0f - 2.0f * t.anchorY;
+    const float want = t.span / std::max(framingScale_, 0.01f);
+    auto extents = [&](float D, float& v, float& h) {
+        const float u = -X * D * tanHalf * aspect, w = -Y * D * tanHalf;
+        float yMin = 1e9f, yMax = -1e9f, xMin = 1e9f, xMax = -1e9f;
+        for (const auto& p : q) {
+            if (!p.span) continue;
+            const float z = (p.c + D) * tanHalf;
+            const float ny = (p.b - w) / z, nx = (p.a - u) / (z * aspect);
+            yMin = std::min(yMin, ny);
+            yMax = std::max(yMax, ny);
+            xMin = std::min(xMin, nx);
+            xMax = std::max(xMax, nx);
+        }
+        v = (yMax - yMin) * 0.5f;  // NDC spans 2 per frame
+        h = (xMax - xMin) * 0.5f;
+    };
+    auto spanAt = [&](float D) {
+        float v, h;
+        extents(D, v, h);
+        return t.spanAxis == 1 ? h : t.spanAxis == 2 ? std::max(v, h) : v;
+    };
+    float lo = std::max(nearest + 1.0f, 1.0f), hi = 1e5f;
+    if (spanAt(lo) <= 1e-6f || spanAt(hi) >= want) return false;  // span points have no extent
+    bool reached = spanAt(lo) >= want;
+    float D = lo;
+    if (reached) {
+        for (int it = 0; it < 80; ++it) {
+            const float mid = std::sqrt(lo * hi);  // geometric: D spans decades
+            (spanAt(mid) > want ? lo : hi) = mid;
+        }
+        D = 0.5f * (lo + hi);
+    }
+
+    const float u = -X * D * tanHalf * aspect, w = -Y * D * tanHalf;
+    const RE::NiPoint3 target = anchor + right * u + up * w;
+    orbitCenterX_ = target.x;
+    orbitCenterY_ = target.y;
+    orbitCenterValid_ = true;
+    SetOrbit(yaw, pitch, D, target.z);
+    Update();
+
+    // What was achieved, through the real view / projection.
+    Project(anchor, aspect, result.anchorX, result.anchorY);
+    float yMin = 1e9f, yMax = -1e9f, xMin = 1e9f, xMax = -1e9f;
+    for (size_t i = 0; i < n; ++i) {
+        if (!in(t.spanMask, i)) continue;
+        float fx, fy;
+        if (!Project(t.points[i], aspect, fx, fy)) continue;
+        yMin = std::min(yMin, fy);
+        yMax = std::max(yMax, fy);
+        xMin = std::min(xMin, fx);
+        xMax = std::max(xMax, fx);
+    }
+    result.spanV = yMax - yMin;
+    result.spanH = xMax - xMin;
+    result.spanReached = reached;
+    return true;
+}
+
+bool CameraController::Project(const RE::NiPoint3& p, float aspect, float& fx, float& fy) {
+    using namespace DirectX;
+    Update();
+    const XMMATRIX vp = GetView() * XMMatrixPerspectiveFovRH(fov_ * XM_PI / 180.0f, aspect, 0.1f, 10000.0f);
+    const XMVECTOR h = XMVector4Transform(XMVectorSet(p.x, p.y, p.z, 1.0f), vp);
+    const float wv = XMVectorGetW(h);
+    if (wv <= 1e-6f) return false;
+    fx = (XMVectorGetX(h) / wv + 1.0f) * 0.5f;
+    fy = (1.0f - XMVectorGetY(h) / wv) * 0.5f;
     return true;
 }
 

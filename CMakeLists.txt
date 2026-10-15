@@ -188,6 +188,26 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES
     ${SKYRIM_RENDERER_HEADERS} ${SKYRIM_RENDERER_SOURCES})
 
 ###############################################################################
+# Camera framing test (no game needed): the real CameraController
+###############################################################################
+if(PROJECT_IS_TOP_LEVEL)
+    add_executable(skyrim-renderer-camera-test
+        tests/camera/CameraFramingTest.cpp
+        src/SkyrimRenderer/CameraController.cpp
+        src/SkyrimRenderer/AnimationTypes.cpp)
+    target_include_directories(skyrim-renderer-camera-test PRIVATE include)
+    target_link_libraries(skyrim-renderer-camera-test PRIVATE CommonLibSSE::CommonLibSSE spdlog::spdlog)
+    set_target_properties(skyrim-renderer-camera-test PROPERTIES
+        MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR}
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON)
+    if(MSVC)
+        target_compile_options(skyrim-renderer-camera-test PRIVATE /utf-8 /EHsc /Zc:preprocessor
+            /experimental:external /external:anglebrackets /external:W0)
+    endif()
+endif()
+
+###############################################################################
 # Distribution — populate contrib/ for FOMOD packaging (standalone only)
 ###############################################################################
 if(PROJECT_IS_TOP_LEVEL)

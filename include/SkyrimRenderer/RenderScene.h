@@ -66,6 +66,14 @@ public:
     std::optional<CameraPreset> GetActivePreset() const;
     void RestoreActivePreset(std::optional<CameraPreset> preset);
     void SetCameraPreset(CameraPreset preset);
+    /// Frames caller points (SkyrimRendererAPI.h FrameToPoints). space 0:
+    /// scene space as drawn; 1: bind-pose model space, carried by the head
+    /// bone's current pose. Kept as the active framing: a FOV or framing
+    /// scale change solves it again; SetCamera / pan / a preset end it.
+    bool FrameToPoints(PointsTarget target, uint32_t space, PointsResult& result);
+    /// The FaceGen head's landmarks as drawn, and where the current camera
+    /// puts them: the eye line and brows-to-chin, as frame fractions.
+    bool GetFaceLandmarks(FacePoints& out, float& eyeLineY, float& faceSpan, std::string* why);
 
     float GetCameraYaw() const;
     float GetCameraPitch() const;
@@ -372,6 +380,9 @@ private:
     ShaderPipeline shader_;
     CameraController camera_;
     std::optional<CameraPreset> activePreset_;  // camera still on this preset (refit on FOV / framing)
+    std::optional<PointsTarget> pointsFrame_;   // or still on these points (scene space)
+    bool ApplyPointsLocked(PointsResult* result = nullptr);
+    float AspectLocked() const;
     std::unique_ptr<MeshRenderer> meshRenderer_;
     std::unique_ptr<SceneLook> sceneLook_;
 
@@ -459,6 +470,7 @@ private:
 
     // Cached head bone position (extracted from skeleton NIF for Face preset pivot)
     RE::NiPoint3 headBonePos_{0, 0, 0};
+    BoneTransform headBoneBind_;  // bind-pose model-space transform of NPC Head [Head]
     bool hasHeadBone_ = false;
 
     // Mesh cache — keyed by "meshPath|skeletonPath", stores parsed+GPU-ready meshes.

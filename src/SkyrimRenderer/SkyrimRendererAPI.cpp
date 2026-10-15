@@ -1065,6 +1065,70 @@ SKYRIMRENDERER_API float SkyrimRenderer_GetFramingScale(uint32_t scene) {
     return rs ? rs->GetFramingScale() : 0.0f;
 }
 
+// ---- Framing to points ----
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_FrameToPoints(uint32_t scene, const float* xyz, uint32_t count,
+                                                         uint32_t space, const SkyrimRenderer_FrameTarget* target,
+                                                         SkyrimRenderer_FrameResult* out) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    if (!rs) return FromResult(Result::InvalidHandle);
+    if (!xyz || !count || count > 32 || !target || target->structSize < sizeof(SkyrimRenderer_FrameTarget)) {
+        return FromResult(Result::InvalidParameter);
+    }
+    PointsTarget t;
+    t.points.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) t.points.push_back({xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]});
+    t.anchorMask = target->anchorMask;
+    t.anchorX = target->anchorX;
+    t.anchorY = target->anchorY;
+    t.spanMask = target->spanMask;
+    t.spanAxis = target->spanAxis;
+    t.span = target->span;
+    t.setAngles = (target->flags & SKYRIMRENDERER_FRAME_SET_ANGLES) != 0;
+    t.yaw = target->yaw;
+    t.pitch = target->pitch;
+    PointsResult r;
+    if (!rs->FrameToPoints(std::move(t), space, r)) return FromResult(Result::InvalidParameter);
+    if (out && out->structSize >= sizeof(SkyrimRenderer_FrameResult)) {
+        const uint32_t structSize = out->structSize;
+        std::memset(out, 0, sizeof(SkyrimRenderer_FrameResult));
+        out->structSize = structSize;
+        out->yaw = rs->GetCameraYaw();
+        out->pitch = rs->GetCameraPitch();
+        out->distance = rs->GetCameraDistance();
+        out->focalHeight = rs->GetCameraFocalHeight();
+        out->anchorX = r.anchorX;
+        out->anchorY = r.anchorY;
+        out->spanV = r.spanV;
+        out->spanH = r.spanH;
+        out->spanReached = r.spanReached ? 1 : 0;
+    }
+    return FromResult(Result::Success);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetFaceLandmarks(uint32_t scene, SkyrimRenderer_FaceLandmarks* out) {
+    auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene));
+    if (!rs || !out || out->structSize < sizeof(SkyrimRenderer_FaceLandmarks)) return 0;
+    FacePoints f;
+    float eyeLine = 0, span = 0;
+    std::string why;
+    if (!rs->GetFaceLandmarks(f, eyeLine, span, &why)) return 0;
+    const uint32_t structSize = out->structSize;
+    std::memset(out, 0, sizeof(SkyrimRenderer_FaceLandmarks));
+    out->structSize = structSize;
+    out->flags = (f.browFromShape ? SKYRIMRENDERER_FACE_BROW_SHAPE : 0) | (f.chinFromMesh ? SKYRIMRENDERER_FACE_CHIN_MESH : 0) |
+                 (f.eyesSplit ? SKYRIMRENDERER_FACE_EYES_SPLIT : 0) | (f.posed ? SKYRIMRENDERER_FACE_POSED : 0);
+    auto put = [](float* d, const RE::NiPoint3& p) { d[0] = p.x; d[1] = p.y; d[2] = p.z; };
+    put(out->browTop, f.browTop);
+    put(out->eyeRight, f.eyeRight);
+    put(out->eyeLeft, f.eyeLeft);
+    put(out->mouth, f.mouth);
+    put(out->chin, f.chin);
+    out->eyeLineY = eyeLine;
+    out->faceSpan = span;
+    return 1;
+}
+
 // ---- Prep workers ----
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPrepWorkers(int32_t workers) {
