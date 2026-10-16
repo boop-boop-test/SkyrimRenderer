@@ -141,7 +141,9 @@ static void DiagnosticWalk(RE::NiAVObject* obj, uint32_t& geomCount,
     if (auto* geom = obj->AsGeometry()) {
         geomCount++;
         auto& rtData = geom->GetGeometryRuntimeData();
-        if (rtData.rendererData) {
+        // A BSDynamicTriShape's rendererData is a different renderer object,
+        // not a BSGraphics::TriShape: its fields can't be read as one.
+        if (rtData.rendererData && !geom->AsDynamicTriShape()) {
             withRD++;
             if (rtData.rendererData->vertexBuffer) withVB++;
             if (rtData.rendererData->rawVertexData) withRaw++;
@@ -164,7 +166,10 @@ static void ShareRendererData(RE::NiAVObject* original, RE::NiAVObject* clone) {
     auto* origGeom = original->AsGeometry();
     auto* cloneGeom = clone->AsGeometry();
 
-    if (origGeom && cloneGeom) {
+    // Dynamic shapes are skipped: their rendererData is not a TriShape (no
+    // refCount to bump), and BSDynamicTriShape::CreateClone already shares it
+    // and gives the clone its own dynamicData.
+    if (origGeom && cloneGeom && !origGeom->AsDynamicTriShape()) {
         auto& origRtData = origGeom->GetGeometryRuntimeData();
         auto& cloneRtData = cloneGeom->GetGeometryRuntimeData();
 

@@ -204,7 +204,12 @@ void ProbeGeometry(RE::BSGeometry* geom) {
     SKSE::log::info("[GameNifProbe]   {} '{}' verts={} tris={} fmt=[{}]", kind, geom->name.c_str(), verts, tris,
                     DescribeFlags(rd.vertexDesc));
 
-    if (auto* r = rd.rendererData) {
+    // A BSDynamicTriShape's rendererData is a different renderer object, not a
+    // BSGraphics::TriShape (its +0x20 isn't rawVertexData): log the pointer only.
+    if (rd.rendererData && geom->AsDynamicTriShape()) {
+        SKSE::log::info("[GameNifProbe]     rendererData: {} (dynamic, not a TriShape)",
+                        static_cast<const void*>(rd.rendererData));
+    } else if (auto* r = rd.rendererData) {
         SKSE::log::info("[GameNifProbe]     rendererData: vb={} ib={} rawVertex={} rawIndex={}",
                         static_cast<const void*>(r->vertexBuffer), static_cast<const void*>(r->indexBuffer),
                         static_cast<const void*>(r->rawVertexData), static_cast<const void*>(r->rawIndexData));
