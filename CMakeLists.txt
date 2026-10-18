@@ -19,6 +19,17 @@ string(CONCAT MSVC_RUNTIME_LIBRARY_STR
 # Dependencies  guard against parent-provided targets
 ###############################################################################
 
+###############################################################################
+# Release DLLs carry no path of the build machine: __FILE__ and std::source_location (spdlog, CommonLib's logging and
+# asserts) are relative to this repo, and the debug directory names a PDB by file name only. Directory scope and
+# before CommonLib is added, so its objects get it too (C++ only: rc.exe takes no /d1). Standalone builds only (a
+# parent that builds the library decides for its own build). /pathmap would also need /experimental:deterministic.
+###############################################################################
+if(PROJECT_IS_TOP_LEVEL AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CONFIG:Debug>>>:/d1trimfile:${CMAKE_CURRENT_SOURCE_DIR}/>")
+    add_link_options("$<$<NOT:$<CONFIG:Debug>>:/PDBALTPATH:%_PDB%>")
+endif()
+
 # CommonLibSSE: when consumed by DressCode, the parent already built this.
 if(NOT TARGET CommonLibSSE::CommonLibSSE)
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
