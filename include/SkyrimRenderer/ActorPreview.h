@@ -354,7 +354,7 @@ private:
     void SetBaseOutfitAndRebuild(const std::vector<RE::FormID>& armor);
 
     // Composite player's tint mask layers into a single face tint texture
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> CompositePlayerTintLayers(ID3D11Device* device);
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> CompositePlayerTintLayers(ID3D11Device* device, const RE::Color& bodyTint);
 
     RenderScene& scene_;
     RE::FormID actorFormID_ = 0;

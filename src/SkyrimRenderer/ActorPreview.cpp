@@ -1,5 +1,6 @@
 #include "SkyrimRenderer/ActorPreview.h"
 
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1468,10 +1469,17 @@ bool ActorPreview::UploadLiveFacePositions(
                 continue;
             }
 
+            float oldMin[3] = {FLT_MAX, FLT_MAX, FLT_MAX}, oldMax[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            float newMin[3] = {FLT_MAX, FLT_MAX, FLT_MAX}, newMax[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
             for (uint32_t v = 0; v < mesh.vertexCount; ++v) {
-                mesh.bindPoseVertices[v].position[0] = morphPositions[v][0];
-                mesh.bindPoseVertices[v].position[1] = morphPositions[v][1];
-                mesh.bindPoseVertices[v].position[2] = morphPositions[v][2];
+                auto& p = mesh.bindPoseVertices[v].position;
+                for (int a = 0; a < 3; ++a) {
+                    oldMin[a] = std::min(oldMin[a], p[a]);
+                    oldMax[a] = std::max(oldMax[a], p[a]);
+                    p[a] = morphPositions[v][a];
+                    newMin[a] = std::min(newMin[a], p[a]);
+                    newMax[a] = std::max(newMax[a], p[a]);
+                }
             }
             std::vector<std::array<float, 3>> normalScratch;
             RecomputeNormals(mesh, normalScratch);
@@ -1479,15 +1487,19 @@ bool ActorPreview::UploadLiveFacePositions(
             const bool uploaded = UploadMeshBindPose(meshIndex);
 
             if (uploaded) {
-                mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = FLT_MAX;
-                mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] = -FLT_MAX;
-                for (const auto& pos : morphPositions) {
-                    mesh.boundsMin[0] = std::min(mesh.boundsMin[0], pos[0]);
-                    mesh.boundsMin[1] = std::min(mesh.boundsMin[1], pos[1]);
-                    mesh.boundsMin[2] = std::min(mesh.boundsMin[2], pos[2]);
-                    mesh.boundsMax[0] = std::max(mesh.boundsMax[0], pos[0]);
-                    mesh.boundsMax[1] = std::max(mesh.boundsMax[1], pos[1]);
-                    mesh.boundsMax[2] = std::max(mesh.boundsMax[2], pos[2]);
+                // A head preview draws the player's face unskinned: its bounds are
+                // the positions. A full preview skins it, and the loader's bounds
+                // are on the skeleton's bind pose: they move by the change in skin
+                // space (exact for head parts, whose bind poses only translate;
+                // a head NIF in head-bone space is ~120 units below where drawn).
+                for (int a = 0; a < 3; ++a) {
+                    if (headOnly_) {
+                        mesh.boundsMin[a] = newMin[a];
+                        mesh.boundsMax[a] = newMax[a];
+                    } else {
+                        mesh.boundsMin[a] += newMin[a] - oldMin[a];
+                        mesh.boundsMax[a] += newMax[a] - oldMax[a];
+                    }
                 }
                 patchedCount++;
                 if (!quiet) {
@@ -2003,6 +2015,32 @@ static bool LoadDDSToPixels(const std::string& path,
                     outPixels[dstIdx + 3] = 255;
                 }
             }
+        } else if ((bpp == 16 || bpp == 24) && (rMask | gMask | bMask | aMask) != 0) {
+            // Packed RGB(A) by the header's bit masks (B8G8R8, B5G6R5, ...);
+            // luminance formats carry the grey value in the red mask.
+            const uint32_t bytesPer = bpp / 8;
+            const size_t rowPitch = static_cast<size_t>(outWidth) * bytesPer;
+            if (pixelDataSize < rowPitch * outHeight) return false;
+            const bool luminance = (pfFlags & 0x20000) != 0;  // DDPF_LUMINANCE
+            auto channel = [](uint32_t px, uint32_t mask, uint8_t none) -> uint8_t {
+                if (mask == 0) return none;
+                const uint32_t shift = static_cast<uint32_t>(std::countr_zero(mask));
+                const uint32_t max = mask >> shift;
+                return static_cast<uint8_t>(((px & mask) >> shift) * 255u / max);
+            };
+            for (uint32_t y = 0; y < outHeight; ++y) {
+                const uint8_t* row = pixelData + y * rowPitch;
+                for (uint32_t x = 0; x < outWidth; ++x) {
+                    uint32_t px = 0;
+                    for (uint32_t b = 0; b < bytesPer; ++b) px |= static_cast<uint32_t>(row[x * bytesPer + b]) << (8 * b);
+                    const uint32_t dstIdx = (y * outWidth + x) * 4;
+                    const uint8_t r = channel(px, rMask, 0);
+                    outPixels[dstIdx + 0] = r;
+                    outPixels[dstIdx + 1] = luminance ? r : channel(px, gMask, 0);
+                    outPixels[dstIdx + 2] = luminance ? r : channel(px, bMask, 0);
+                    outPixels[dstIdx + 3] = channel(px, aMask, 255);
+                }
+            }
         } else {
             SKSE::log::warn("[SkyrimRenderer] Unsupported DDS format: fourCC=0x{:X} bpp={} rMask=0x{:X}",
                             fourCC, bpp, rMask);
@@ -2014,7 +2052,7 @@ static bool LoadDDSToPixels(const std::string& path,
 }
 
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
-ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
+ActorPreview::CompositePlayerTintLayers(ID3D11Device* device, const RE::Color& bodyTint) {
     if (!device) return nullptr;
     if (REL::Module::IsVR()) return nullptr;
 
@@ -2028,7 +2066,11 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
         ? overlayTints
         : &REL::RelocateMemberIfNewer<RE::BSTArray<RE::TintMask*>>(
               SKSE::RUNTIME_SSE_1_6_629, player, 0xB10, 0xB18);
-    if (!tintList || tintList->empty()) {
+    // Without a SkinTone layer the face takes the skin colour the body has
+    // (QNAM, which the engine keeps equal to the SkinTone layer's colour).
+    const bool hasBodyTint = bodyTint.red > 0 || bodyTint.green > 0 || bodyTint.blue > 0;
+    const bool noMasks = !tintList || tintList->empty();
+    if (noMasks && !hasBodyTint) {
         SKSE::log::info("[SkyrimRenderer] Player has no tint masks");
         return nullptr;
     }
@@ -2041,8 +2083,12 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
     // The shader applies (sample + 1/255) * 255/64 — at value 63, this gives ~0.984 ≈ 1.0 (identity).
     std::vector<uint8_t> composite(kPixelCount * 4, 63);
 
+    const uint32_t maskCount = noMasks ? 0u : tintList->size();
+
     // First pass: apply skin tone as base fill
-    for (auto* mask : *tintList) {
+    bool skinFilled = false;
+    for (uint32_t m = 0; m < maskCount; ++m) {
+        auto* mask = (*tintList)[m];
         if (!mask || mask->type != RE::TintMask::Type::kSkinTone) continue;
 
         float r = mask->color.red / 255.0f;
@@ -2065,11 +2111,23 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
         SKSE::log::info("[SkyrimRenderer] Tint layer: SkinTone color=({},{},{}) alpha={:.2f} -> ({},{},{})",
                         mask->color.red, mask->color.green, mask->color.blue,
                         a, finalR, finalG, finalB);
+        skinFilled = true;
         break;
+    }
+    if (!skinFilled && hasBodyTint) {
+        for (uint32_t i = 0; i < kPixelCount; ++i) {
+            composite[i * 4 + 0] = bodyTint.red;
+            composite[i * 4 + 1] = bodyTint.green;
+            composite[i * 4 + 2] = bodyTint.blue;
+            composite[i * 4 + 3] = 255;
+        }
+        SKSE::log::info("[SkyrimRenderer] Tint layer: no SkinTone layer ({} masks), the skin colour (QNAM) ({},{},{})",
+                        maskCount, bodyTint.red, bodyTint.green, bodyTint.blue);
     }
 
     // Second pass: blend other layers on top
-    for (auto* mask : *tintList) {
+    for (uint32_t m = 0; m < maskCount; ++m) {
+        auto* mask = (*tintList)[m];
         if (!mask) continue;
         if (mask->type == RE::TintMask::Type::kSkinTone) continue;  // already applied
         if (mask->alpha <= 0.001f) continue;  // skip invisible layers
@@ -2159,7 +2217,7 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device) {
     }
 
     SKSE::log::info("[SkyrimRenderer] Composited player tint texture: {}x{} from {} layers",
-                    kTintTexSize, kTintTexSize, tintList->size());
+                    kTintTexSize, kTintTexSize, maskCount);
     return srv;
 }
 
@@ -2767,9 +2825,32 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         srgbToLinear(skinLayerTint[2])
     };
 
+    // The head part behind each head mesh: the loaded part, else by editor ID
+    // (FaceGen NIFs name each baked shape after its head part).
+    std::unordered_map<std::string, RE::BGSHeadPart*> partsByEditorID;
+    if (visualNPC->headParts) {
+        for (int8_t i = 0; i < visualNPC->numHeadParts; ++i) CollectHeadParts(visualNPC->headParts[i], partsByEditorID);
+    }
+    if (faceData && faceData->headParts) {
+        for (auto* hp : *faceData->headParts) CollectHeadParts(hp, partsByEditorID);
+    }
+    auto headPartOf = [&](const LoadedMesh& mesh) -> RE::BGSHeadPart* {
+        if (!IsDrivableHeadMesh(mesh)) return nullptr;
+        if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) return it->second;
+        if (auto it = partsByEditorID.find(mesh.name); it != partsByEditorID.end()) return it->second;
+        return nullptr;
+    };
+    auto isHairPart = [](const RE::BGSHeadPart* part) {
+        using T = RE::BGSHeadPart::HeadPartType;
+        const auto type = part->type.get();
+        return type == T::kHair || type == T::kEyebrows || type == T::kFacialHair;
+    };
+
     for (auto& mesh : meshes) {
-        // Eyes should never receive skin or hair tint
-        if (mesh.shadingModel == ShadingModel::EyeEnvMap) continue;
+        // The engine tints only FaceGen, SkinTint and HairTint materials: eyes
+        // with either eye shader (kEye, or kEnvironmentMap as eye replacers use
+        // for the ball and the lens) keep their texture's colours.
+        if (mesh.shadingModel == ShadingModel::EyeEnvMap || mesh.shadingModel == ShadingModel::EnvironmentMap) continue;
 
         if (mesh.shadingModel == ShadingModel::FaceGen) {
             if (!mesh.tintSRV && hasSkinTint) {
@@ -2797,6 +2878,8 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                 mesh.tintColor[2] = hairTint[2];
             }
             // else: keep the NIF-baked color (already in mesh.tintColor from NifMeshLoader)
+        } else if (const auto* part = headPartOf(mesh); part && !isHairPart(part)) {
+            // A plain-shaded head part (mouth, scar, eye parts) is not tinted.
         } else if (HasFlag(mesh.shaderFlags, ShaderFlags::SoftLighting) && hasSkinTint) {
             mesh.tintColor[0] = skinLinear[0];
             mesh.tintColor[1] = skinLinear[1];
@@ -2861,7 +2944,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             }
         }
 
-        auto compositeTint = CompositePlayerTintLayers(device);
+        auto compositeTint = CompositePlayerTintLayers(device, visualNPC->bodyTintColor);
         for (auto& mesh : meshes) {
             if (mesh.shadingModel == ShadingModel::FaceGen && !mesh.tintSRV && compositeTint) {
                 mesh.tintSRV = compositeTint;
@@ -2881,6 +2964,9 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             case ShadingModel::FaceGenRGB: modelName = "FaceGenRGB"; break;
             case ShadingModel::HairTint:   modelName = "HairTint";   break;
             case ShadingModel::EyeEnvMap:  modelName = "EyeEnvMap";  break;
+            case ShadingModel::EnvironmentMap: modelName = "EnvironmentMap"; break;
+            case ShadingModel::Glowmap:    modelName = "Glowmap";    break;
+            case ShadingModel::TruePBR:    modelName = "TruePBR";    break;
         }
         SKSE::log::info("[SkyrimRenderer] Mesh '{}': shading={} tint=({:.3f},{:.3f},{:.3f}) "
                         "specStr={:.3f} specColor=({:.3f},{:.3f},{:.3f}) flags=0x{:X}",
