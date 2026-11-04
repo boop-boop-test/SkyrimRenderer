@@ -6,7 +6,7 @@ in first person the player cannot see their own head nods or facial
 expressions (No Talk Just Hands plays both on the player), so a small window
 shows the player's head as the third-person character is posed right now.
 
-The renderer only provides primitives; consumers (NTJH, DressCode) decide when
+The renderer only provides primitives; consumers (NTJH, ...) decide when
 to show the window.
 
 ## API summary

@@ -33,7 +33,7 @@ using ConsumerId = std::uintptr_t;
 /// This is the primary entry point for consuming code.
 ///
 /// Two ways to drive rendering:
-///   - Composite mode (DressCode): InstallPresentHook once; every frame the hook
+///   - Composite mode: InstallPresentHook once; every frame the hook
 ///     ticks animations, renders pending scenes and draws composite rects into
 ///     the engine's framebuffer before Present.
 ///   - Texture mode (UI hosts): no Present hook. The consumer calls Tick() and/or

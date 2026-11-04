@@ -11,7 +11,7 @@
 //   Data/SKSE/Plugins/<Owner>/SkyrimRenderer/SkyrimRenderer.dll   bundled copy
 //   Data/SKSE/Plugins/<Owner>/SkyrimRenderer/shaders/             its shaders
 //
-// Bundles must use their own <Owner> folder (DressCode, NoTalkJustHands, ...)
+// Bundles must use their own <Owner> folder (NoTalkJustHands, ...)
 // so no two mods overwrite the same file.
 //
 // Rules:

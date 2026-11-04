@@ -5,7 +5,7 @@
 ///
 /// SkyrimRenderer provides offscreen 3D rendering for Skyrim SE/VR using
 /// the game's own shader pipeline. It is designed as a standalone library
-/// with zero DressCode dependencies.
+/// with no dependencies on the mods that use it.
 ///
 /// ## Layers
 ///

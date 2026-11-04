@@ -11,7 +11,6 @@ and reading the reflection / signature listings — not inferred from reading co
 
 ## Status — implemented for faces, eyes, hair
 
-Tracked in DressCode `.issues/082` (with #83 nifly, #84 Havok, #86 cleanup).
 The implementation differs from the plan below in two ways:
 
 - **Shaders come from CS's disk cache**, not our own compile:

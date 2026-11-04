@@ -30,7 +30,7 @@ if(PROJECT_IS_TOP_LEVEL AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     add_link_options("$<$<NOT:$<CONFIG:Debug>>:/PDBALTPATH:%_PDB%>")
 endif()
 
-# CommonLibSSE: when consumed by DressCode, the parent already built this.
+# CommonLibSSE: when consumed by a parent project, the parent already built this.
 if(NOT TARGET CommonLibSSE::CommonLibSSE)
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
     include("${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibVR-ng/cmake/CommonLibSSE.cmake")
@@ -151,7 +151,7 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/RenderSceneMaterials.cpp
 )
 
-# Always a shared DLL. Every consumer (DressCode, NTJH, ...) loads one copy at
+# Always a shared DLL. Every consumer (NTJH, ...) loads one copy at
 # runtime through SkyrimRendererLoader.h, which picks the newest installed
 # build, so there is exactly one renderer per game process.
 # PROJECT_VERSION is the build version the loader compares (Windows file
