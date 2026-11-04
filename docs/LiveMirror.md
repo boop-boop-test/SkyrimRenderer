@@ -43,7 +43,7 @@ frame: from the Present hook for composite consumers, or from the consumer's
 own `SkyrimRenderer_Tick` in texture mode. On SE/AE Present runs on the game's
 main thread, where the existing live-face code (`ExtractPlayerFaceFromLive`)
 already reads game objects; the mirror reads at the same point, after the
-frame's animation, face and NTJH updates. A mirror that changed the preview
+frame's animation, face and consumer updates. A mirror that changed the preview
 queues a render of its scene if the scene is shown (composite rect or texture
 mode); unshown scenes are not rendered.
 
@@ -158,14 +158,14 @@ What the design assumes and needs in-game confirmation for:
    third-person body is still used in first person (e.g. its shadow), so its
    bone locals are expected to update. Reading locals avoids depending on the
    world update of a culled subtree; it does not help if the graph itself is
-   paused. If it is, NTJH-style gestures would have to drive the preview
+   paused. If it is, consumer-driven gestures would have to drive the preview
    directly (`LoadAnimation` on the preview) instead.
 2. **The third-person face animation data updates in first person.**
    `GetFaceGenAnimationData()` on the player is expected to return the
    third-person face node's data. If its final keyframes stop updating, the
-   requested-keyframe fallback still mirrors explicit overrides (MFG / NTJH
+   requested-keyframe fallback still mirrors explicit overrides (MFG / consumer
    expressions) but not transitions or blinks.
-3. **NTJH head gestures**: if NTJH plays them through the third-person graph
+3. **Consumer head gestures**: if a consumer plays them through the third-person graph
    or by writing third-person bone locals before Present, they mirror. If it
    only drives the first-person graph in first person, they do not.
 

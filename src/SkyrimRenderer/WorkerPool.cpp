@@ -15,7 +15,7 @@ namespace {
 constexpr uint32_t kMaxWorkers = 6;
 constexpr uint32_t kReservedCores = 2;
 // Workers used by default: half the physical cores minus one, at most three.
-// Measured in game (NTJH, 8-core / 16-thread Ryzen 3700X, two driven heads):
+// Measured in game (8-core / 16-thread Ryzen 3700X, two driven heads):
 // prep wall time flattens at 2-3 workers while every added worker inflates
 // total prep CPU (1.7 ms at 0 -> 3.5 at 3 -> 4.8 at 6, per head), because the
 // game's own threads are busy at the same time. 3 workers = 6's wall time for

@@ -1,4 +1,4 @@
-// Smoke test only (NTJH supplies the real eye_remap.hlsl): radial remap of
+// Smoke test only (the consumer supplies the real remap): radial remap of
 // the pupil and iris around Center, always sampling the original.
 cbuffer Params {
     float2 Center = float2(0.5, 0.5);

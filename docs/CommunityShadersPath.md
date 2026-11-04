@@ -4,12 +4,12 @@ Investigation notes for an optional render path: when Community Shaders (CS) is
 installed, compile CS's own `Data/Shaders/Lighting.hlsl` pixel shader at runtime
 and feed it from our pipeline, falling back to our shaders otherwise.
 
-Source checked: `doodlum/skyrim-community-shaders` @ `dd2677f` (2026-08-25),
+Source checked: `doodlum/skyrim-community-shaders` @ `dd2677f`,
 shallow clone at `../../skyrim-community-shaders`. All findings below were
 verified by compiling `Lighting.hlsl` with `fxc /T ps_5_0` (the profile CS uses)
 and reading the reflection / signature listings — not inferred from reading code.
 
-## Status (2026-10-11) — implemented for faces, eyes, hair
+## Status — implemented for faces, eyes, hair
 
 Tracked in DressCode `.issues/082` (with #83 nifly, #84 Havok, #86 cleanup).
 The implementation differs from the plan below in two ways:
@@ -196,8 +196,7 @@ colour out toward the Studio preset's blue/lavender fill and ambient.
 Separately, every torch (vanilla too) has a `HeatRefraction:0` lit shape with
 the Refraction flag whose diffuse slot is a normal map
 (`effects\VaporTileNormal_n.dds`); drawn as a surface it is a large lavender
-swirl over the torch (seen in NTJH's cached torch thumbnail, Skyrim.esm
-0001D4EC). Refraction shapes are now skipped.
+swirl over the torch (e.g. Skyrim.esm 0001D4EC). Refraction shapes are now skipped.
 
 Now TruePBR shapes get `ShadingModel::TruePBR`: native path = GGX
 metallic/roughness from RMAOS (`shaders/PBR.hlsl`), emissive from slot 2;
