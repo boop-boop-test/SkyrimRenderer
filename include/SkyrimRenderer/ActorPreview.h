@@ -17,6 +17,7 @@
 struct SkyrimRenderer_HeadShapeInfo;
 struct SkyrimRenderer_HeadSourceInfo;
 struct SkyrimRenderer_LiveMirrorStatus;
+struct SkyrimRenderer_DressInfo;
 
 namespace SkyrimRenderer {
 
@@ -69,6 +70,23 @@ public:
 
     /// Get the list of currently equipped armor FormIDs.
     std::vector<RE::FormID> GetEquippedItems() const;
+
+    // ── Dressing (ActorPreviewDress.cpp) ────────────────────────────────────
+
+    /// Replace every armor piece with a resolved outfit (SKYRIMRENDERER_DRESS_*
+    /// mode and flags) and rebuild; the result becomes the base outfit. Held
+    /// items stay. `source` 0 = this preview's own actor. Full previews only.
+    /// `out` (optional) gets what was used.
+    Result Dress(uint32_t mode, RE::FormID source, uint32_t flags, SkyrimRenderer_DressInfo* out);
+
+    /// Re-read the head from the game (head parts, the player's live face or
+    /// rest) and rebuild: a full preview with what it wears, a head preview
+    /// only its head. Main thread.
+    Result ReloadHead();
+
+    /// Where driven shape `index` took its rest (SKYRIMRENDERER_REST_*), -1
+    /// for an unknown index.
+    int32_t GetHeadShapeRestSource(uint32_t index) const;
 
     // ── Held Items (ActorPreviewHeldItems.cpp) ──────────────────────────────
     // Weapons, torches and ammo hang rigidly from skeleton nodes (hand nodes
@@ -310,27 +328,30 @@ private:
     // GPU-skinned vertex image when the caller already built it.
     bool UploadMeshBindPose(uint32_t meshIndex, const uint8_t* skinned = nullptr);
 
-    // Attach an armor addon NIF to the skeleton (scene graph)
-    Result AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARMA* armorAddon);
-
     // Load all armor addon meshes (NifReader) for an armor piece
     void LoadArmorAddonMeshes(RE::TESObjectARMO* armor, RE::TESRace* race, bool isFemale, MeshTag tag,
                               std::vector<std::string>* loadedPaths = nullptr);
 
-    // Detach armor addon NIFs for a given armor form
-    void DetachArmor(RE::FormID armorFormID);
-
-    // Rebuild the actor's equipped visuals
-    void RebuildEquipment();
-
     // Find bone node by name in the skeleton
     RE::NiNode* FindBone(const char* boneName) const;
 
-    // Extract player's face meshes from the live scene graph (FaceGen is generated at runtime)
-    bool ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet = false);
+    // Extract player's face meshes from the live scene graph (FaceGen is generated at runtime).
+    // withRest: also collect each shape's FaceGen rest (FOD) into playerFaceRestPositions_.
+    bool ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet = false,
+                                   bool withRest = false);
 
-    // Upload playerFaceMorphPositions_ into the meshes recorded in liveFaceBindings_.
-    bool UploadLiveFacePositions(bool quiet);
+    // Upload `positions` (live shape name -> xyz) into the meshes recorded in
+    // liveFaceBindings_; meshes whose live shape is not in the map are left.
+    bool UploadLiveFacePositions(const std::unordered_map<std::string, std::vector<std::array<float, 3>>>& positions,
+                                 bool quiet);
+
+    // The default-outfit / typical armor for this preview (Dress modes 2-3), resolved
+    // through leveled lists and filtered to the race. ActorPreviewDress.cpp.
+    std::vector<RE::FormID> ResolveDefaultOutfit(RE::TESForm* source, RE::TESRace* race,
+                                                 RE::FormID& usedSource) const;
+    std::vector<RE::FormID> ResolveTypicalOutfit(RE::TESRace* race, bool isFemale, RE::FormID& usedSource) const;
+    // Set the base outfit to `armor` and rebuild with it (held items kept). Lock held.
+    void SetBaseOutfitAndRebuild(const std::vector<RE::FormID>& armor);
 
     // Composite player's tint mask layers into a single face tint texture
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> CompositePlayerTintLayers(ID3D11Device* device);
@@ -400,6 +421,12 @@ private:
     // Player face morph positions collected from live scene graph (shapeName → positions)
     // Used to patch disk-loaded head meshes with the player's actual morphed face geometry.
     std::unordered_map<std::string, std::vector<std::array<float, 3>>> playerFaceMorphPositions_;
+    // The same shapes' FaceGen rest (BSFaceGenBaseMorphExtraData "FOD"), where they have one.
+    std::unordered_map<std::string, std::vector<std::array<float, 3>>> playerFaceRestPositions_;
+    // SKYRIMRENDERER_PLAYER_FACE_* the player's head was last built with.
+    uint32_t playerFaceRest_ = 0;
+    // Loaded head mesh name -> SKYRIMRENDERER_REST_* (meshes not listed: NIF).
+    std::unordered_map<std::string, int32_t> restSourceByMesh_;
 
     // Loaded head mesh name → live face shape name, recorded when the disk-loaded
     // head was first patched. RefreshLiveFace only touches these meshes.

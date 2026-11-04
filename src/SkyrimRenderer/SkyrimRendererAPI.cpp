@@ -464,6 +464,17 @@ SKYRIMRENDERER_API void SkyrimRenderer_RebuildWithCurrentOutfit(uint32_t actor) 
     if (preview) preview->RebuildWithCurrentOutfit();
 }
 
+SKYRIMRENDERER_API int32_t SkyrimRenderer_DressActor(uint32_t actor, uint32_t mode, uint32_t sourceFormID,
+                                                     uint32_t flags, SkyrimRenderer_DressInfo* out) {
+    if (out && out->structSize >= sizeof(SkyrimRenderer_DressInfo)) {
+        const uint32_t structSize = out->structSize;
+        *out = {};
+        out->structSize = structSize;
+    }
+    auto* preview = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return preview && Succeeded(preview->Dress(mode, static_cast<RE::FormID>(sourceFormID), flags, out)) ? 1 : 0;
+}
+
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadAnimation(uint32_t actor, const char* animationPath) {
     return FromResult(SceneManager::GetInstance().LoadAnimation(
@@ -709,6 +720,21 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRe
 
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags) {
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->SetHeadDriveFlags(flags);
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_SetScenePlayerFaceRest(uint32_t scene, uint32_t mode) {
+    if (mode > SKYRIMRENDERER_PLAYER_FACE_RESTING) return;
+    if (auto* rs = SceneManager::GetInstance().GetScene(ToScene(scene))) rs->SetPlayerFaceRest(mode);
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeRestSource(uint32_t actor, uint32_t index) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeRestSource(index) : -1;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_ReloadActorHead(uint32_t actor) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && Succeeded(a->ReloadHead()) ? 1 : 0;
 }
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {

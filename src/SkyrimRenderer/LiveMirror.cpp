@@ -306,8 +306,10 @@ bool LiveMirror::Tick(ActorPreview& actor, float deltaSeconds) {
             // The player's face was patched with live vertices at load, which
             // hold the expression of that moment; re-read them now and remove
             // the morphs of the values just read, so the tri morphs add to a
-            // neutral face instead of doubling the expression.
-            if (playerFace && !vertices && neutralizedGeneration_ != actor.meshGeneration_ && !liveFace_.empty()) {
+            // neutral face instead of doubling the expression. A head built at
+            // rest (SKYRIMRENDERER_PLAYER_FACE_RESTING) is neutral already.
+            if (playerFace && !vertices && actor.playerFaceRest_ != SKYRIMRENDERER_PLAYER_FACE_RESTING &&
+                neutralizedGeneration_ != actor.meshGeneration_ && !liveFace_.empty()) {
                 fm.Blend();
                 CopyLiveFace(actor, /*subtractMorphs=*/true);
                 neutralizedGeneration_ = actor.meshGeneration_;

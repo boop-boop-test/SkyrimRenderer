@@ -22,6 +22,7 @@
 // NifMeshLoader must come after RE/Skyrim.h and d3d11.h
 #include "SkyrimRenderer/NifMeshLoader.h"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -158,6 +159,11 @@ public:
     /// shapes). Default 1, 0 = none, negative clamps to 0.
     void SetEmissiveScale(float scale);
     float GetEmissiveScale() const;
+
+    /// SKYRIMRENDERER_PLAYER_FACE_*: the rest the player's head takes in this
+    /// scene's loads and rebuilds (0 = as drawn this frame, the default).
+    void SetPlayerFaceRest(uint32_t mode) { playerFaceRest_.store(mode); }
+    uint32_t GetPlayerFaceRest() const { return playerFaceRest_.load(); }
 
     // ── Rendering ───────────────────────────────────────────────────────────
 
@@ -496,6 +502,8 @@ private:
 
     // GPU skinning pose (borrowed pointer — caller owns the data)
     const BonePoseMap* gpuSkinningPose_ = nullptr;
+
+    std::atomic<uint32_t> playerFaceRest_{0};  // SKYRIMRENDERER_PLAYER_FACE_*
 
     // Thread safety
     mutable std::mutex mutex_;

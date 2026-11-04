@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <future>
 #include <unordered_map>
@@ -154,123 +155,6 @@ static void DiagnosticWalk(RE::NiAVObject* obj, uint32_t& geomCount,
             if (child) DiagnosticWalk(child.get(), geomCount, withRD, withVB, withRaw);
         }
     }
-}
-
-// ============================================================================
-// Helper: Share GPU buffer references from original to clone
-// ============================================================================
-
-static void ShareRendererData(RE::NiAVObject* original, RE::NiAVObject* clone) {
-    if (!original || !clone) return;
-
-    auto* origGeom = original->AsGeometry();
-    auto* cloneGeom = clone->AsGeometry();
-
-    // Dynamic shapes are skipped: their rendererData is not a TriShape (no
-    // refCount to bump), and BSDynamicTriShape::CreateClone already shares it
-    // and gives the clone its own dynamicData.
-    if (origGeom && cloneGeom && !origGeom->AsDynamicTriShape()) {
-        auto& origRtData = origGeom->GetGeometryRuntimeData();
-        auto& cloneRtData = cloneGeom->GetGeometryRuntimeData();
-
-        if (origRtData.rendererData && !cloneRtData.rendererData) {
-            cloneRtData.rendererData = origRtData.rendererData;
-            InterlockedIncrement(&origRtData.rendererData->refCount);
-        }
-    }
-
-    auto* origNode = original->AsNode();
-    auto* cloneNode = clone->AsNode();
-
-    if (origNode && cloneNode) {
-        auto& origChildren = origNode->GetChildren();
-        auto& cloneChildren = cloneNode->GetChildren();
-
-        uint32_t count = static_cast<uint32_t>(
-            std::min(origChildren.size(), cloneChildren.size()));
-        for (uint32_t i = 0; i < count; ++i) {
-            ShareRendererData(origChildren[i].get(), cloneChildren[i].get());
-        }
-    }
-}
-
-// ============================================================================
-// Helper: Load a NIF model via BSModelDB
-// ============================================================================
-//
-// Logs the GPU resource state of both the original (cached) model and the
-// clone to determine where rendererData gets lost.
-
-static RE::NiPointer<RE::NiNode> LoadModel(const std::string& meshPath) {
-    // Use NiStream to load NIFs directly — BSModelDB::Demand returns empty
-    // shells (vertexCount=0, no rendererData). NiStream calls BSTriShape::LoadBinary
-    // which reads vertex data from the NIF and creates GPU buffers.
-    //
-    // NiStream can't be stack-allocated (CommonLib declares virtual functions
-    // without implementations, causing link errors). Instead we heap-allocate
-    // via the game's memory system and patch the vtable to the game's NiStream vtable.
-    {
-        // Allocate NiStream and manually construct it.
-        // Can't stack-allocate (CommonLib declares virtuals without implementations).
-        auto* niStream = static_cast<RE::NiStream*>(RE::calloc(1, sizeof(RE::NiStream)));
-        if (niStream) {
-            // Patch vtable to the game's NiStream vtable
-            auto vtableAddr = RE::VTABLE_NiStream[0].address();
-            *reinterpret_cast<uintptr_t*>(niStream) = vtableAddr;
-
-            // Construct container members via placement new
-            new (&niStream->groups) RE::BSTSmallArray<RE::NiObjectGroup>();
-            new (&niStream->objects) RE::NiTLargeObjectArray<RE::NiPointer<RE::NiObject>>();
-            new (&niStream->objectSizes) RE::NiTLargePrimitiveArray<std::uint32_t>();
-            new (&niStream->topObjects) RE::NiTLargeObjectArray<RE::NiPointer<RE::NiObject>>();
-            new (&niStream->fixedStrings) RE::NiTLargeObjectArray<RE::BSFixedString>();
-
-            // Set NIF version fields
-            niStream->nifMaxVersion = 0x14020007;           // NIF 20.2.0.7 (SSE)
-            niStream->nifMaxUserDefinedVersion = 130;       // SSE user version 2
-
-            // Use Load3 (path-based) instead of Load1 (stream-based).
-            // Load3 handles BSA resolution and may set up additional internal
-            // state needed for full vertex data loading.
-            if (niStream->Load3(meshPath.c_str())) {
-                RE::NiPointer<RE::NiNode> result;
-                for (uint32_t i = 0; i < niStream->topObjects.size(); ++i) {
-                    auto* obj = niStream->topObjects[i].get();
-                    if (obj && obj->AsNode()) {
-                        result = RE::NiPointer<RE::NiNode>(static_cast<RE::NiNode*>(obj));
-                        break;
-                    }
-                }
-
-                if (result) {
-                    uint32_t gc = 0, rd = 0, vb = 0, raw = 0;
-                    DiagnosticWalk(result.get(), gc, rd, vb, raw);
-                    SKSE::log::info("[SkyrimRenderer] NiStream '{}': {} geom, {} rendererData, {} VB, {} raw",
-                                    meshPath, gc, rd, vb, raw);
-
-                    niStream->~NiStream();
-                    RE::free(niStream);
-                    return result;
-                }
-                SKSE::log::warn("[SkyrimRenderer] NiStream loaded but no NiNode in: {}", meshPath);
-            } else {
-                SKSE::log::warn("[SkyrimRenderer] NiStream::Load3 failed for: {}", meshPath);
-            }
-            niStream->~NiStream();
-            RE::free(niStream);
-        }
-    }
-
-    // Fallback to BSModelDB (empty shells, won't render)
-    SKSE::log::warn("[SkyrimRenderer] Falling back to BSModelDB for: {}", meshPath);
-    RE::NiPointer<RE::NiNode> model;
-    RE::BSModelDB::DBTraits::ArgsType args;
-    auto result = RE::BSModelDB::Demand(meshPath.c_str(), model, args);
-    if (result != RE::BSResource::ErrorCode::kNone || !model) {
-        return nullptr;
-    }
-    auto* cloned = static_cast<RE::NiNode*>(model->Clone());
-    return RE::NiPointer<RE::NiNode>(cloned);
 }
 
 // ============================================================================
@@ -513,86 +397,52 @@ void ActorPreview::ResetGPUSkinningPose() {
 Result ActorPreview::LoadFromDisk(RE::TESNPC* npc) {
     if (!npc) return Result::InvalidParameter;
 
-    // Get the NPC's race for body mesh
     auto* race = npc->GetRace();
     if (!race) {
         SKSE::log::error("[SkyrimRenderer] NPC 0x{:X} has no race", npc->GetFormID());
         return Result::InvalidParameter;
     }
 
-    // Create a root node for the actor
+    const bool isFemale = npc->IsFemale();
+    auto& skelModel = race->skeletonModels[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
+    skeletonNifPath_ = std::string("meshes\\") + skelModel.model.c_str();
+    skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
+
+    // Dummy root, as for a loaded actor: rendering goes through the loaded
+    // meshes. (Until build 1.10.0 this path attached the skeleton and the
+    // outfit's NIFs to a scene graph that is never drawn, and loaded no body
+    // or head.)
     auto* rootNode = RE::NiNode::Create(0);
     if (!rootNode) return Result::OutOfMemory;
-
     actorNode_ = RE::NiPointer<RE::NiNode>(rootNode);
     actorNode_->name = "SkyrimRenderer_ActorRoot";
 
-    // Enable GPU skinning for animation
+    scene_.ClearLoadedMeshes();
     useGPUSkinning_ = true;
 
-    // Load the body skeleton and mesh.
-    // For loaded NPCs this would be cloned from the live reference.
-    // For unloaded NPCs, we need to load the race's body mesh from disk.
-
-    bool isFemale = npc->IsFemale();
-    auto& skelModel = race->skeletonModels[isFemale ? RE::SEXES::kFemale : RE::SEXES::kMale];
-
-    // Load skeleton via BSModelDB (for scene graph) and NifReader (for vertex data)
-    auto skelPath = std::string("meshes\\") + skelModel.model.c_str();
-    skeletonNifPath_ = skelPath;
-    skeletonHkxPath_ = ResolveSkeletonHkxPath(race, isFemale, skeletonNifPath_);
-    auto skeleton = LoadModel(skelPath);
-
-    // Load skeleton mesh data via NifReader for rendering
-    scene_.LoadNifMesh(skelPath);
-
-    if (!skeleton) {
-        SKSE::log::warn("[SkyrimRenderer] Failed to load skeleton for NPC 0x{:X}, creating minimal root",
-                        npc->GetFormID());
-        // Create a minimal skeleton with essential bones
-        skeleton = RE::NiPointer<RE::NiNode>(RE::NiNode::Create(1));
-        skeleton->name = "NPC Root [Root]";
+    // Not loaded, so nothing is worn: the default outfit, else what the race
+    // and sex typically wear (DressActor AUTO without WORN).
+    // Filtered to the race the meshes are built for (SkyPatcher's visual NPC).
+    auto* visual = SkyPatcherService::GetInstance().Resolve(npc);
+    auto* visualRace = visual && visual->GetRace() ? visual->GetRace() : race;
+    const bool visualFemale = visual ? visual->IsFemale() : isFemale;
+    RE::FormID usedSource = 0;
+    auto outfit = ResolveDefaultOutfit(npc, visualRace, usedSource);
+    const char* how = "default outfit";
+    if (outfit.empty()) {
+        outfit = ResolveTypicalOutfit(visualRace, visualFemale, usedSource);
+        how = outfit.empty() ? "nothing to wear" : "typical outfit for the race and sex";
     }
-
-    actorNode_->AttachChild(skeleton.get());
-
-    // Body meshes (skin, head, etc.) are baked into the skeleton NIF
-    // or loaded through armor addons. BGSBodyPartData defines hit zones,
-    // not mesh paths. The default outfit loading below handles visible geometry.
-
-    // Apply FaceGen data if available
-    // FaceGen morphs are stored per-NPC and applied to the head mesh
-    auto* faceGenManager = RE::BSFaceGenManager::GetSingleton();
-    if (faceGenManager && npc->IsPlayer()) {
-        // For the player, FaceGen is always available
-        // For other NPCs, we'd need to load from FaceGenData files
+    baseOutfit_.clear();
+    for (RE::FormID id : outfit) {
+        auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(id);
+        baseOutfit_.push_back({id, armor ? armor->GetSlotMask().underlying() : 0u, {}});
     }
+    RebuildMeshes(outfit);
 
-    // Apply skin texture tint
-    // The NPC's tint layers define skin color, war paint, etc.
-    // These modify the head/body diffuse textures
-
-    // Load default outfit equipment
-    auto* defaultOutfit = npc->defaultOutfit;
-    if (defaultOutfit) {
-        for (auto* item : defaultOutfit->outfitItems) {
-            if (auto* armor = item ? item->As<RE::TESObjectARMO>() : nullptr) {
-                for (auto* armorAddon : armor->armorAddons) {
-                    if (armorAddon && armorAddon->IsValidRace(race)) {
-                        AttachArmorAddon(armor, armorAddon);
-                    }
-                }
-                equippedItems_.push_back({armor->GetFormID(), {}});
-            }
-        }
-    }
-
-    // Update transforms
-    RE::NiUpdateData updateData;
-    actorNode_->Update(updateData);
-
-    SKSE::log::info("[SkyrimRenderer] Loaded NPC 0x{:X} from disk ('{}')",
-                    npc->GetFormID(), npc->GetFullName());
+    SKSE::log::info("[SkyrimRenderer] Loaded NPC 0x{:X} ('{}') from its records: {} ({} items from 0x{:X}), {} meshes",
+                    npc->GetFormID(), npc->GetFullName(), how, outfit.size(), usedSource,
+                    scene_.GetLoadedMeshes().size());
     return Result::Success;
 }
 
@@ -625,57 +475,21 @@ Result ActorPreview::EquipItem(RE::FormID armorFormID) {
         if (eq.formID == armorFormID) return Result::Success;
     }
 
-    // Get the NPC's race
-    auto* race = baseNPC_->GetRace();
-    if (!race) return Result::InvalidParameter;
-
-    uint32_t newSlots = armor->GetSlotMask().underlying();
-
-    // Detach any equipped items whose slots conflict with the new item
-    for (auto it = equippedItems_.begin(); it != equippedItems_.end(); ) {
-        if (it->slotMask & newSlots) {
-            SKSE::log::info("[SkyrimRenderer] EquipItem: detaching 0x{:X} (slots 0x{:X} conflict with new item 0x{:X})",
-                            it->formID, it->slotMask & newSlots, armorFormID);
-            DetachArmor(it->formID);
-            it = equippedItems_.erase(it);
-        } else {
-            ++it;
+    // Everything shown but the pieces sharing a slot with the new one, plus
+    // the new one, rebuilt (body slots, hair hidden by slots 31 / 41, the
+    // driven head: all as RebuildMeshes does it).
+    const uint32_t newSlots = armor->GetSlotMask().underlying();
+    std::vector<RE::FormID> outfit;
+    for (const auto& eq : equippedItems_) {
+        if (eq.slotMask & newSlots) {
+            SKSE::log::info("[SkyrimRenderer] EquipItem: 0x{:X} off (slots 0x{:X} taken by 0x{:X})",
+                            eq.formID, eq.slotMask & newSlots, armorFormID);
+            continue;
         }
+        outfit.push_back(eq.formID);
     }
-
-    // Also detach conflicting base outfit items (e.g., hair hidden by a wig)
-    for (auto& baseItem : baseOutfit_) {
-        if (baseItem.slotMask & newSlots) {
-            SKSE::log::info("[SkyrimRenderer] EquipItem: hiding base item 0x{:X} (slots 0x{:X} conflict with 0x{:X})",
-                            baseItem.formID, baseItem.slotMask & newSlots, armorFormID);
-            DetachArmor(baseItem.formID);
-        }
-    }
-
-    // If the new item covers Hair (slot 31, bit 1) or LongHair (slot 41, bit 11),
-    // hide hair head part meshes. Many wigs only claim LongHair.
-    constexpr uint32_t kHairSlotBits = (1u << 1) | (1u << 11);  // slot 31 or 41
-    if (newSlots & kHairSlotBits) {
-        scene_.ClearMeshesByTag(MeshTag::Hair);
-        SKSE::log::info("[SkyrimRenderer] EquipItem: cleared Hair head part meshes (slot 31 covered by 0x{:X})", armorFormID);
-    }
-
-    // Attach all valid armor addons for this race
-    EquippedItemInfo itemInfo;
-    itemInfo.formID = armorFormID;
-    itemInfo.slotMask = newSlots;
-
-    for (auto* armorAddon : armor->armorAddons) {
-        if (armorAddon && armorAddon->IsValidRace(race)) {
-            AttachArmorAddon(armor, armorAddon);
-        }
-    }
-
-    equippedItems_.push_back(std::move(itemInfo));
-
-    // Update scene graph
-    RE::NiUpdateData updateData;
-    actorNode_->Update(updateData);
+    outfit.push_back(armorFormID);
+    RebuildMeshes(outfit);
 
     SKSE::log::info("[SkyrimRenderer] Equipped item 0x{:X} (slots=0x{:X}) on preview", armorFormID, newSlots);
     return Result::Success;
@@ -690,19 +504,14 @@ Result ActorPreview::UnequipItem(RE::FormID armorFormID) {
 
     if (IsHeldItemForm(armorFormID)) return UnequipHeldItemLocked(armorFormID);
 
-    DetachArmor(armorFormID);
-
-    // Remove from equipped list
-    equippedItems_.erase(
-        std::remove_if(equippedItems_.begin(), equippedItems_.end(),
-                       [armorFormID](const EquippedItemInfo& info) {
-                           return info.formID == armorFormID;
-                       }),
-        equippedItems_.end());
-
-    // Update scene graph
-    RE::NiUpdateData updateData;
-    actorNode_->Update(updateData);
+    std::vector<RE::FormID> outfit;
+    bool worn = false;
+    for (const auto& eq : equippedItems_) {
+        if (eq.formID == armorFormID) worn = true;
+        else outfit.push_back(eq.formID);
+    }
+    if (!worn) return Result::Success;
+    RebuildMeshes(outfit);
 
     SKSE::log::info("[SkyrimRenderer] Unequipped item 0x{:X} from preview", armorFormID);
     return Result::Success;
@@ -791,18 +600,10 @@ void ActorPreview::UnequipAll() {
     if (headOnly_) return;
     std::lock_guard lock(mutex_);
 
-    if (!actorNode_) return;
-
-    for (const auto& eq : equippedItems_) {
-        DetachArmor(eq.formID);
-    }
-    equippedItems_.clear();
+    if (!actorNode_ || !baseNPC_) return;
 
     heldItems_.clear();
-    RemoveHeldItemMeshes();
-
-    RE::NiUpdateData updateData;
-    actorNode_->Update(updateData);
+    RebuildMeshes({});  // drops the held items' meshes with the armor
 }
 
 std::vector<RE::FormID> ActorPreview::GetEquippedItems() const {
@@ -814,128 +615,6 @@ std::vector<RE::FormID> ActorPreview::GetEquippedItems() const {
         result.push_back(eq.formID);
     }
     return result;
-}
-
-// ============================================================================
-// Armor Addon Attachment
-// ============================================================================
-
-Result ActorPreview::AttachArmorAddon(RE::TESObjectARMO* armor, RE::TESObjectARMA* armorAddon) {
-    if (!armor || !armorAddon || !actorNode_ || !baseNPC_) return Result::InvalidParameter;
-
-    bool isFemale = baseNPC_->IsFemale();
-
-    // Get the mesh path for this armor addon
-    const auto& model = isFemale
-        ? armorAddon->bipedModels[RE::SEXES::kFemale]
-        : armorAddon->bipedModels[RE::SEXES::kMale];
-
-    const char* meshPath = model.model.c_str();
-    if (!meshPath || meshPath[0] == '\0') {
-        // Try the other sex's model as fallback
-        const auto& fallback = isFemale
-            ? armorAddon->bipedModels[RE::SEXES::kMale]
-            : armorAddon->bipedModels[RE::SEXES::kFemale];
-        meshPath = fallback.model.c_str();
-        if (!meshPath || meshPath[0] == '\0') return Result::InvalidParameter;
-    }
-
-    // Load the armor addon mesh via BSModelDB (for scene graph structure)
-    auto fullPath = std::string("meshes\\") + meshPath;
-    auto armorNode = LoadModel(fullPath);
-    if (!armorNode) {
-        SKSE::log::warn("[SkyrimRenderer] Failed to load armor mesh: {}", fullPath);
-        return Result::RenderFailed;
-    }
-
-    // Also load via NifReader for actual vertex data rendering
-    scene_.LoadNifMesh(fullPath, MeshTag::None, "", nullptr, actorWeight_);
-
-    // Name the node for tracking
-    char nodeName[128];
-    snprintf(nodeName, sizeof(nodeName), "SkyrimRenderer_Armor_%08X_%08X",
-             armor->GetFormID(), armorAddon->GetFormID());
-    armorNode->name = nodeName;
-
-    // Count geometry in the loaded mesh
-    uint32_t geomCount = 0;
-    std::function<void(RE::NiAVObject*)> countGeom = [&](RE::NiAVObject* obj) {
-        if (!obj) return;
-        if (obj->AsGeometry()) geomCount++;
-        if (auto* n = obj->AsNode()) {
-            for (auto& c : n->GetChildren()) {
-                if (c) countGeom(c.get());
-            }
-        }
-    };
-    countGeom(armorNode.get());
-
-    // Attach to the actor's skeleton.
-    actorNode_->AttachChild(armorNode.get());
-
-    SKSE::log::info("[SkyrimRenderer] Attached armor addon mesh: {} ({} geometry nodes)", fullPath, geomCount);
-    return Result::Success;
-}
-
-void ActorPreview::DetachArmor(RE::FormID armorFormID) {
-    if (!actorNode_) return;
-
-    // Find and remove nodes that match this armor's FormID prefix
-    char prefix[32];
-    snprintf(prefix, sizeof(prefix), "SkyrimRenderer_Armor_%08X_", armorFormID);
-    std::string prefixStr(prefix);
-
-    // Collect nodes to remove (can't modify children while iterating)
-    std::vector<RE::NiAVObject*> toRemove;
-    for (auto& child : actorNode_->GetChildren()) {
-        if (child && child->name.c_str()) {
-            std::string name(child->name.c_str());
-            if (name.find(prefixStr) == 0) {
-                toRemove.push_back(child.get());
-            }
-        }
-    }
-
-    for (auto* node : toRemove) {
-        actorNode_->DetachChild(node);
-    }
-}
-
-void ActorPreview::RebuildEquipment() {
-    if (!actorNode_ || !baseNPC_) return;
-
-    auto* race = baseNPC_->GetRace();
-    if (!race) return;
-
-    // Save equipped list
-    auto equipped = equippedItems_;
-
-    // Strip all armor nodes
-    for (const auto& eq : equipped) {
-        DetachArmor(eq.formID);
-    }
-    equippedItems_.clear();
-
-    // Re-equip
-    for (const auto& eq : equipped) {
-        auto* form = RE::TESForm::LookupByID(eq.formID);
-        auto* armor = form ? form->As<RE::TESObjectARMO>() : nullptr;
-        if (!armor) continue;
-
-        EquippedItemInfo itemInfo;
-        itemInfo.formID = eq.formID;
-
-        for (auto* armorAddon : armor->armorAddons) {
-            if (armorAddon && armorAddon->IsValidRace(race)) {
-                AttachArmorAddon(armor, armorAddon);
-            }
-        }
-
-        equippedItems_.push_back(std::move(itemInfo));
-    }
-
-    RE::NiUpdateData updateData;
-    actorNode_->Update(updateData);
 }
 
 // ============================================================================
@@ -1498,7 +1177,28 @@ RE::NiNode* ActorPreview::FindBone(const char* boneName) const {
 // (which has proper UVs, normals, skinning, textures) and patches positions after.
 // ============================================================================
 
-bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet) {
+namespace {
+
+// CommonLib has only the RTTI; layout as SKSE64's GameExtraData.h (RaceMenu
+// sculpts through it): the FaceGen base morph of one face-node geometry, the
+// rest the engine adds expression morphs to.
+struct FaceGenBaseMorphExtraData : RE::NiExtraData {
+    RE::NiPoint3* vertexData;        // 18
+    std::uint32_t modelVertexCount;  // 20
+    std::uint32_t vertexCount;       // 24
+};
+
+const FaceGenBaseMorphExtraData* FaceGenRest(RE::NiAVObject* geom) {
+    static const RE::BSFixedString kFod("FOD");
+    auto* extra = geom ? geom->GetExtraData(kFod) : nullptr;
+    const auto* rtti = extra ? extra->GetRTTI() : nullptr;
+    if (!rtti || !rtti->GetName() || std::strcmp(rtti->GetName(), "BSFaceGenBaseMorphExtraData") != 0) return nullptr;
+    return static_cast<const FaceGenBaseMorphExtraData*>(extra);
+}
+
+}  // namespace
+
+bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool isFemale, bool quiet, bool withRest) {
     (void)skelPath; (void)isFemale;  // unused now — we just collect positions
     auto* player = RE::PlayerCharacter::GetSingleton();
     if (!player || !player->Is3DLoaded()) {
@@ -1531,6 +1231,7 @@ bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool i
     // Collect morphed positions: shapeName → vector of float[3]
     // Store in a member so we can apply after disk load
     playerFaceMorphPositions_.clear();
+    playerFaceRestPositions_.clear();
 
     std::function<void(RE::NiAVObject*)> walkTree = [&](RE::NiAVObject* obj) {
         if (!obj) return;
@@ -1540,22 +1241,36 @@ bool ActorPreview::ExtractPlayerFaceFromLive(const std::string& skelPath, bool i
             auto* dynTriShape = netimmerse_cast<RE::BSDynamicTriShape*>(geom);
             if (dynTriShape) {
                 auto& dynRD = dynTriShape->GetDynamicTrishapeRuntimeData();
-                if (dynRD.dynamicData) {
-                    auto* triShape = static_cast<RE::BSTriShape*>(dynTriShape);
-                    auto& triRD = triShape->GetTrishapeRuntimeData();
-                    uint16_t numVerts = triRD.vertexCount;
-
-                    // dynamicData is float[4] per vertex (x, y, z, bitangentX)
-                    const float* posData = static_cast<const float*>(dynRD.dynamicData);
+                auto* triShape = static_cast<RE::BSTriShape*>(dynTriShape);
+                const uint32_t numVerts = triShape->GetTrishapeRuntimeData().vertexCount;
+                // dynamicData is numVerts records of dataSize / numVerts bytes
+                // (float[4]: x, y, z, bitangentX); positions are the first 12.
+                const uint32_t stride = numVerts ? dynRD.dataSize / numVerts : 0;
+                if (dynRD.dynamicData && numVerts && stride >= 12) {
                     std::vector<std::array<float, 3>> positions(numVerts);
-                    for (uint16_t v = 0; v < numVerts; ++v) {
-                        positions[v] = {posData[v * 4 + 0], posData[v * 4 + 1], posData[v * 4 + 2]};
+                    dynRD.lock.Lock();
+                    const auto* src = static_cast<const std::byte*>(dynRD.dynamicData);
+                    for (uint32_t v = 0; v < numVerts; ++v) {
+                        std::memcpy(positions[v].data(), src + static_cast<size_t>(v) * stride, 12);
                     }
+                    dynRD.lock.Unlock();
 
                     std::string name = obj->name.c_str();
+                    bool rest = false;
+                    if (withRest) {
+                        const auto* fod = FaceGenRest(geom);
+                        if (fod && fod->vertexData && fod->vertexCount == numVerts) {
+                            std::vector<std::array<float, 3>> restPositions(numVerts);
+                            for (uint32_t v = 0; v < numVerts; ++v) {
+                                restPositions[v] = {fod->vertexData[v].x, fod->vertexData[v].y, fod->vertexData[v].z};
+                            }
+                            playerFaceRestPositions_[name] = std::move(restPositions);
+                            rest = true;
+                        }
+                    }
                     if (!quiet) {
-                        SKSE::log::info("[SkyrimRenderer] Collected {} morphed positions for '{}'",
-                                        numVerts, name);
+                        SKSE::log::info("[SkyrimRenderer] Collected {} morphed positions for '{}'{}",
+                                        numVerts, name, !withRest ? "" : rest ? " (+ FaceGen rest)" : " (no FaceGen rest)");
                     }
                     playerFaceMorphPositions_[name] = std::move(positions);
                 }
@@ -1735,13 +1450,14 @@ bool ActorPreview::UploadMeshBindPose(uint32_t meshIndex, const uint8_t* skinned
     return false;
 }
 
-bool ActorPreview::UploadLiveFacePositions(bool quiet) {
+bool ActorPreview::UploadLiveFacePositions(
+    const std::unordered_map<std::string, std::vector<std::array<float, 3>>>& positions, bool quiet) {
     auto& allMeshes = scene_.GetLoadedMeshesMut();
     uint32_t patchedCount = 0;
 
     for (const auto& [meshName, liveName] : liveFaceBindings_) {
-        auto posIt = playerFaceMorphPositions_.find(liveName);
-        if (posIt == playerFaceMorphPositions_.end()) continue;
+        auto posIt = positions.find(liveName);
+        if (posIt == positions.end()) continue;
         const auto& morphPositions = posIt->second;
 
         for (uint32_t meshIndex = 0; meshIndex < allMeshes.size(); ++meshIndex) {
@@ -1795,8 +1511,9 @@ bool ActorPreview::RefreshLiveFace() {
     if (headOnly_) return false;
     if (!baseNPC_ || !baseNPC_->IsPlayer() || liveFaceBindings_.empty()) return false;
     if (!ExtractPlayerFaceFromLive("", false, /*quiet=*/true)) return false;
-    bool ok = UploadLiveFacePositions(/*quiet=*/true);
+    bool ok = UploadLiveFacePositions(playerFaceMorphPositions_, /*quiet=*/true);
     playerFaceMorphPositions_.clear();
+    playerFaceRestPositions_.clear();
     return ok;
 }
 
@@ -2653,7 +2370,9 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             // Player: load the head from disk (the face head part's own NIF plus
             // the other head parts), then patch positions with morphed data from
             // the live scene graph.
-            playerFaceMorphsCollected = ExtractPlayerFaceFromLive(skelPath, isFemale);
+            playerFaceRest_ = scene_.GetPlayerFaceRest();
+            playerFaceMorphsCollected = ExtractPlayerFaceFromLive(
+                skelPath, isFemale, /*quiet=*/false, playerFaceRest_ == SKYRIMRENDERER_PLAYER_FACE_RESTING);
 
             auto* npc = visualNPC;
             std::vector<RE::BGSHeadPart*> headPartsList;
@@ -2823,6 +2542,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     // ── Post-load: Apply player face morph positions ────────────────────
     // Patch disk-loaded head mesh positions with morphed positions from live scene graph.
     liveFaceBindings_.clear();
+    restSourceByMesh_.clear();
     if (playerFaceMorphsCollected && !playerFaceMorphPositions_.empty()) {
         auto& allMeshes = scene_.GetLoadedMeshesMut();
 
@@ -2890,8 +2610,23 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
 
         // Patch bind-pose positions and (re)build the GPU buffers; the bindings
         // stay so RefreshLiveFace can repeat the upload with fresh positions.
-        UploadLiveFacePositions(/*quiet=*/false);
+        // RESTING: the FaceGen rest where the live shape has one; a shape
+        // without one keeps its NIF (no chargen morph reaches it in the engine
+        // either, so the NIF is its rest).
+        const bool resting = playerFaceRest_ == SKYRIMRENDERER_PLAYER_FACE_RESTING;
+        const auto& source = resting ? playerFaceRestPositions_ : playerFaceMorphPositions_;
+        for (const auto& [meshName, liveName] : liveFaceBindings_) {
+            if (source.contains(liveName)) {
+                restSourceByMesh_[meshName] = resting ? SKYRIMRENDERER_REST_LIVE_FACEGEN : SKYRIMRENDERER_REST_LIVE_DRAWN;
+            }
+        }
+        UploadLiveFacePositions(source, /*quiet=*/false);
+        if (resting) {
+            SKSE::log::info("[SkyrimRenderer] Player head at rest: {} of {} bound shapes from FaceGen rest, the rest from their NIFs",
+                            restSourceByMesh_.size(), liveFaceBindings_.size());
+        }
         playerFaceMorphPositions_.clear();  // done with these
+        playerFaceRestPositions_.clear();
     }
 
     // ── Post-load: Handle FaceGen baked parts + HairTint overrides ────

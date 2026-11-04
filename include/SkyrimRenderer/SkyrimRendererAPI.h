@@ -104,11 +104,13 @@ extern "C" {
 
 // --- Version ---------------------------------------------------------------
 
-// API version. Nothing is released yet: the whole surface below is version 1
-// and may still change without a bump. From the first release on, bump it for
-// every addition and gate new calls on it. (The build version below is
-// separate and only orders installed copies for the loader.)
-#define SKYRIMRENDERER_API_VERSION 1
+// API version: bumped for every addition; gate new calls on it (or on
+// GetProcAddress). The build version below is separate and only orders
+// installed copies for the loader.
+//   1  build 1.9.1, the first release: everything not marked otherwise
+//   2  build 1.10.0: SetScenePlayerFaceRest, GetHeadShapeRestSource,
+//      ReloadActorHead, DressActor
+#define SKYRIMRENDERER_API_VERSION 2
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -274,10 +276,17 @@ SKYRIMRENDERER_API void     SkyrimRenderer_ClearMeshes(uint32_t scene);
 // bind pose (build 1.4.1; before, shapes were drawn as stored and vanilla
 // FaceGen heads, stored in head-bone skin space, sat far below the body).
 // SetPose("") and StopAnimation return to that bind pose too.
+// A reference whose 3D is loaded wears its third-person worn armor; an NPC
+// base form or an unloaded reference wears its default outfit (DressActor
+// DRESS_DEFAULT_OUTFIT, then DRESS_TYPICAL). Before build 1.10.0 the latter
+// loaded no body or head.
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_LoadActorPreview(
     uint32_t scene, uint32_t actorFormID, const char* animationPath);
 SKYRIMRENDERER_API void     SkyrimRenderer_DestroyActorPreview(uint32_t actor);
 
+// Equip / unequip one item and rebuild the meshes (slot conflicts replaced;
+// before build 1.10.0 neither changed what was drawn on a loaded preview but
+// EquipItem appending the item).
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_EquipItem(uint32_t actor, uint32_t armorFormID);
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_UnequipItem(uint32_t actor, uint32_t armorFormID);
 
@@ -295,6 +304,45 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_SetPose(uint32_t actor, const char* a
 
 // Re-applies morphs and rebuilds the mesh with whatever is currently equipped.
 SKYRIMRENDERER_API void     SkyrimRenderer_RebuildWithCurrentOutfit(uint32_t actor);
+
+// --- Dressing (API 2) ------------------------------------------------------
+
+// DressActor modes.
+#define SKYRIMRENDERER_DRESS_AUTO           0u  // WORN for a loaded reference, else DEFAULT_OUTFIT, else TYPICAL
+#define SKYRIMRENDERER_DRESS_WORN           1u  // a loaded reference's third-person worn armor
+#define SKYRIMRENDERER_DRESS_DEFAULT_OUTFIT 2u  // an NPC's default outfit: source = a reference, an NPC (its
+                                                // template chain is followed when it inherits inventory) or
+                                                // an outfit (OTFT) form; leveled lists resolve to one entry,
+                                                // the same one every time for the same NPC
+#define SKYRIMRENDERER_DRESS_TYPICAL        3u  // the outfit most NPCs of the preview's race and sex start in
+                                                // (plain clothes preferred), from the loaded plugins
+#define SKYRIMRENDERER_DRESS_NONE           4u  // no armor (body, head and hair)
+
+// DressActor flags.
+#define SKYRIMRENDERER_DRESS_NO_HEADGEAR 0x100u  // leave out armor covering the head or hair (its ARMO or an
+                                                 // ARMA on slot 30, 31 or 41): helmets, hoods, hats
+
+struct SkyrimRenderer_DressInfo {
+    uint32_t structSize;       // in: sizeof(SkyrimRenderer_DressInfo)
+    uint32_t mode;             // the mode that dressed the preview (AUTO resolved; NONE when nothing fit)
+    uint32_t sourceFormID;     // the reference, NPC or outfit the items came from (0 for NONE)
+    uint32_t itemCount;        // armor pieces worn now
+    uint32_t headgearLeftOut;  // pieces NO_HEADGEAR left out
+};
+
+// Dress a full actor preview: replace every armor piece with the outfit of
+// `mode` and rebuild (held items stay; armor the race cannot wear is skipped;
+// slot conflicts: the later item wins). Hair head parts are hidden by armor
+// whose ARMA covers slot 31 or 41, as at load. The outfit becomes the
+// preview's base outfit (EquipOutfit with replaceAll 0 merges onto it). A
+// live EQUIPMENT mirror replaces it again when the live worn armor changes.
+// sourceFormID 0 = the preview's own actor. Game main thread. Returns 1, 0
+// for an unknown actor, a head preview, or a mode with nothing to wear
+// (WORN of an unloaded reference, an NPC without a default outfit, ...;
+// the preview is left as it was). AUTO only fails on a bad actor: with
+// nothing to wear it dresses NONE. `out` may be NULL.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_DressActor(uint32_t actor, uint32_t mode, uint32_t sourceFormID,
+                                                     uint32_t flags, SkyrimRenderer_DressInfo* out);
 
 // --- Animation -------------------------------------------------------------
 
@@ -444,13 +492,15 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_RefreshLiveFace(uint32_t actor);
 // SetHeadDriveFlags is called on them (off until then: no cost): the FaceGen
 // face and the head parts, never armor or the body. Their shapes are rebuilt,
 // and the arrays reset, whenever the preview rebuilds its meshes (Equip*,
-// RebuildWithCurrentOutfit, live mirror EQUIPMENT) or a head mesh is added or
+// RebuildWithCurrentOutfit, DressActor, ReloadActorHead, live mirror
+// EQUIPMENT) or a head mesh is added or
 // removed (a hood hiding the hair): GetHeadShapeGeneration then changes, and
 // shape indices and positions pointers from before must be fetched again.
 //
 // Pointers stay valid until DestroyActorPreview (on a full preview: until the
 // generation changes). A head preview never rebuilds itself (Equip* /
-// RebuildWithCurrentOutfit are refused on it). The other calls
+// RebuildWithCurrentOutfit / DressActor are refused on it); only the
+// caller's ReloadActorHead rebuilds it. The other calls
 // here are game main thread only. Any thread may write the arrays, as long
 // as the write finishes before the render that should show it starts (e.g.
 // the workers are joined before RenderToTexture(s) is called), no render of
@@ -542,6 +592,52 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRe
 // OFFSETS resets every positions[] array (to rest, or to zeros). On a full
 // preview the first call builds the driven head (arrays per these flags).
 SKYRIMRENDERER_API void SkyrimRenderer_SetHeadDriveFlags(uint32_t actor, uint32_t flags);
+
+// ---- The player's head rest (API 2) ----
+//
+// The player has no FaceGen NIF: the engine builds the head from the race's
+// head parts and the character's sliders, and RaceMenu changes it live. A
+// player preview loads the head part NIFs and takes positions from the live
+// face-node shapes that match them (by name, else a unique vertex count).
+
+// SetScenePlayerFaceRest modes.
+#define SKYRIMRENDERER_PLAYER_FACE_DRAWN   0u  // default (API 1 behaviour): the live positions as drawn
+                                               // at load: this frame's expression, blink and any other
+                                               // mod's vertex edits included
+#define SKYRIMRENDERER_PLAYER_FACE_RESTING 1u  // the head at rest: each live shape's FaceGen base morph
+                                               // (BSFaceGenBaseMorphExtraData "FOD": race morphs,
+                                               // sliders, RaceMenu sculpt); a shape without one keeps
+                                               // its NIF, which is the engine's rest for it too (no
+                                               // chargen morph reaches it). No expression.
+
+// Where a head shape's rest came from (GetHeadShapeRestSource).
+#define SKYRIMRENDERER_REST_NIF          0  // the shape's NIF on disk
+#define SKYRIMRENDERER_REST_LIVE_DRAWN   1  // the player's live positions as drawn at load
+#define SKYRIMRENDERER_REST_LIVE_FACEGEN 2  // the player's live FaceGen rest (FOD)
+
+// The rest the player's head takes in this scene's loads and rebuilds from
+// now on (LoadActorHead, LoadActorPreview, LoadActorFromReference, Equip*,
+// DressActor, ReloadActorHead). Set it before loading. Heads already loaded
+// keep theirs until rebuilt. With RESTING a FACE mirror adds the live
+// expression to the rest (with DRAWN it first subtracts the morphs of the
+// moment from the drawn face); FACE_VERTICES and RefreshLiveFace still copy
+// the live face as drawn.
+SKYRIMRENDERER_API void SkyrimRenderer_SetScenePlayerFaceRest(uint32_t scene, uint32_t mode);
+
+// SKYRIMRENDERER_REST_* of a driven head shape (GetHeadShapeInfo index), -1
+// for an unknown actor or index. Non-player heads are all REST_NIF.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeRestSource(uint32_t actor, uint32_t index);
+
+// Re-read an actor's head from the game and rebuild it: head parts, the face
+// part, the player's live face (after RaceMenu, a new hair, a new face), skin
+// and hair colours. A full preview rebuilds all its meshes with what it wears;
+// a head preview rebuilds its head (the one call that rebuilds a head
+// preview). GetHeadShapeGeneration then changes: fetch shape infos and
+// positions pointers again. Expression weights are kept. There is no
+// automatic detection: call it when the head changed (RaceMenu closed, a head
+// part was swapped). Game main thread. Returns 1, 0 for an unknown actor or a
+// failed load (the preview is then empty).
+SKYRIMRENDERER_API int32_t SkyrimRenderer_ReloadActorHead(uint32_t actor);
 
 // Turn a bone after the pose: a model-space rotation applied to the bone and
 // every bone under it after each pose (animation sample, bind pose, live
