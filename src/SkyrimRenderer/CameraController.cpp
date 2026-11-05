@@ -29,6 +29,15 @@ std::string Lower(const std::string& s) {
     return out;
 }
 
+// An eye shape by name, for heads whose eyes use a plain env-map shader
+// instead of the eye shader (eye replacers such as LDD / AEAC, LydiaDF's
+// 'LDFEyes'). Lashes, shadows and liners are not eyes.
+bool IsEyeName(const std::string& lower) {
+    return lower.find("eye") != std::string::npos && lower.find("lash") == std::string::npos &&
+           lower.find("shadow") == std::string::npos && lower.find("liner") == std::string::npos &&
+           lower.find("brow") == std::string::npos;
+}
+
 struct Box {
     float min[3] = {1e9f, 1e9f, 1e9f};
     float max[3] = {-1e9f, -1e9f, -1e9f};
@@ -154,31 +163,36 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
             RE::NiPoint3 mouthCenter{0, 0, 0};
             bool foundEyes = false, foundMouth = false;
 
+            // Eyes: the eye-shader shapes, else eye shapes by name (eye
+            // replacers use a plain env-map shader). Centre of all of them.
+            RE::NiPoint3 shaderEyeSum{0, 0, 0}, namedEyeSum{0, 0, 0};
+            int shaderEyes = 0, namedEyes = 0;
+
             for (const auto& m : meshes) {
                 float cx = (m.boundsMin[0] + m.boundsMax[0]) * 0.5f;
                 float cy = (m.boundsMin[1] + m.boundsMax[1]) * 0.5f;
                 float cz = (m.boundsMin[2] + m.boundsMax[2]) * 0.5f;
+                const std::string lower = Lower(m.name);
 
                 if (m.shadingModel == ShadingModel::EyeEnvMap) {
-                    if (!foundEyes) {
-                        eyeCenter = {cx, cy, cz};
-                        foundEyes = true;
-                    } else {
-                        // Second eye — average with first
-                        eyeCenter.x = (eyeCenter.x + cx) * 0.5f;
-                        eyeCenter.y = (eyeCenter.y + cy) * 0.5f;
-                        eyeCenter.z = (eyeCenter.z + cz) * 0.5f;
-                    }
+                    shaderEyeSum += RE::NiPoint3{cx, cy, cz};
+                    ++shaderEyes;
+                } else if (m.shadingModel != ShadingModel::FaceGen && IsEyeName(lower)) {
+                    namedEyeSum += RE::NiPoint3{cx, cy, cz};
+                    ++namedEyes;
                 }
 
-                if (!foundMouth && !m.name.empty()) {
-                    std::string lower = m.name;
-                    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    if (lower.find("mouth") != std::string::npos) {
-                        mouthCenter = {cx, cy, cz};
-                        foundMouth = true;
-                    }
+                if (!foundMouth && lower.find("mouth") != std::string::npos) {
+                    mouthCenter = {cx, cy, cz};
+                    foundMouth = true;
                 }
+            }
+            if (shaderEyes > 0) {
+                eyeCenter = shaderEyeSum / static_cast<float>(shaderEyes);
+                foundEyes = true;
+            } else if (namedEyes > 0) {
+                eyeCenter = namedEyeSum / static_cast<float>(namedEyes);
+                foundEyes = true;
             }
 
             if (foundEyes && foundMouth && headBonePos) {
@@ -306,10 +320,7 @@ bool CameraController::MeasureFace(const std::vector<LoadedMesh>& meshes, const 
         const std::string lower = Lower(m.name);
         if (!mouth && lower.find("mouth") != std::string::npos) mouth = &m;
         else if (lower.find("brow") != std::string::npos) brows.push_back(&m);
-        else if (lower.find("eye") != std::string::npos && lower.find("lash") == std::string::npos &&
-                 lower.find("shadow") == std::string::npos && lower.find("liner") == std::string::npos) {
-            eyesByName.push_back(&m);
-        }
+        else if (IsEyeName(lower)) eyesByName.push_back(&m);
     }
     if (eyes.empty()) eyes = std::move(eyesByName);
     if (!face || eyes.empty() || !mouth) return fail(!face ? "no FaceGen face shape" : eyes.empty() ? "no eye shape" : "no mouth shape");
