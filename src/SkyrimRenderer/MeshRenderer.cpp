@@ -59,7 +59,7 @@ void MeshRenderer::DrawMeshes(ID3D11DeviceContext* ctx,
         if (mesh.alphaMode != AlphaMode::Blended || mesh.isEffect) continue;
         // DEPTH_WRITE_DECALS (SLSF1_DECAL) needs depth write ON for proper layering.
         // DYNAMIC_DECAL only gets depth bias (rasterizer), not depth write override.
-        bool needsDepthWrite = HasFlag(mesh.shaderFlags, ShaderFlags::Decal);
+        bool needsDepthWrite = HasFlag(mesh.shaderFlags, ShaderFlags::Decal) && mesh.decalDepthWrite;
         ctx->OMSetDepthStencilState(needsDepthWrite ? dsWrite : dsReadOnly, ref);
         DrawSingleMesh(ctx, mesh);
     }

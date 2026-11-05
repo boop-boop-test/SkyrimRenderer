@@ -1438,6 +1438,8 @@ bool LoadNifMeshes(const std::string& meshPath, ID3D11Device* device,
 
                 uint32_t sf1 = shader->flags1;
                 uint32_t sf2 = shader->flags2;
+                mesh.nifShaderFlags[0] = sf1;
+                mesh.nifShaderFlags[1] = sf2;
 
                 // Bit positions from references/SkyrimShaderFlags.h
                 if (sf1 & (1 << 0))  mesh.shaderFlags |= ShaderFlags::Specular;          // SLSF1_SPECULAR

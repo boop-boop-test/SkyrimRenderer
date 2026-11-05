@@ -110,7 +110,9 @@ extern "C" {
 //   1  build 1.9.1, the first release: everything not marked otherwise
 //   2  build 1.10.0: SetScenePlayerFaceRest, GetHeadShapeRestSource,
 //      ReloadActorHead, DressActor
-#define SKYRIMRENDERER_API_VERSION 2
+//   3  build 1.11.0: AddHeadExtraShape, GetHeadExtraPositions,
+//      RemoveHeadExtraShape
+#define SKYRIMRENDERER_API_VERSION 3
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -638,6 +640,60 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeRestSource(uint32_t actor,
 // part was swapped). Game main thread. Returns 1, 0 for an unknown actor or a
 // failed load (the preview is then empty).
 SKYRIMRENDERER_API int32_t SkyrimRenderer_ReloadActorHead(uint32_t actor);
+
+// ---- Extra shapes on a driven head (API 3) ----
+//
+// A mesh of the caller's own (tears, sweat, a decal) drawn with one of the
+// head's shapes: its positions are in that shape's vertex space (the space of
+// HeadShapeInfo.positions / restPositions) and it is skinned on that shape's
+// "NPC Head [Head]" bone, so it moves with the head exactly as the shape's
+// head-weighted vertices do. The caller rewrites the positions (e.g. every
+// frame from the face's current positions); normals, UVs, colours and
+// triangles stay as given.
+//
+// Material: the first shape of materialNif with a BSLightingShaderProperty:
+// its textures, shader type, flags, specular, glossiness, environment map and
+// mask, env scale, material alpha and its NiAlphaProperty. Vertex colours
+// multiply the diffuse when the material has SLSF2_VERTEX_COLORS; vertex alpha
+// always multiplies the alpha. A blended material is drawn after the opaque
+// and cut-out shapes, depth tested; it writes depth only when it has both
+// SLSF1_DECAL and SLSF2_ZBUFFER_WRITE (DECAL alone gets the depth bias).
+//
+// Lifetime: an extra belongs to the head it was added to. It is removed with
+// it: DestroyActorPreview, ReloadActorHead, and every rebuild of the driven
+// head (GetHeadShapeGeneration changes). Watch the generation and add them
+// again. Extras are not head shapes: GetHeadShapeCount / Info, expressions,
+// camera framing and the live mirror never see them.
+
+struct SkyrimRenderer_ExtraShapeDesc {
+    uint32_t        structSize;        // in: sizeof(SkyrimRenderer_ExtraShapeDesc)
+    char            name[128];         // for logs
+    uint32_t        headShape;         // GetHeadShapeInfo index whose space and head bone the extra uses
+    uint32_t        vertexCount;       // 1..65535
+    const float*    positions;         // 3 per vertex: the first positions (required)
+    const float*    normals;           // 3 per vertex; NULL = (0, 0, 1)
+    const float*    uvs;               // 2 per vertex; NULL = (0.5, 0.5)
+    const float*    colors;            // 4 per vertex, rgba 0..1; NULL = white, alpha 1
+    uint32_t        triangleCount;     // >= 1
+    const uint16_t* indices;           // 3 per triangle, each < vertexCount (required)
+    char            materialNif[SKYRIMRENDERER_HEAD_TEXT];  // with or without the leading "meshes\"
+};
+
+// Add an extra shape to a head actor, or to a full preview with a driven head
+// (SetHeadDriveFlags called). The arrays are copied. Returns its index (>= 0),
+// -1 when refused (unknown actor, no driven head, bad headShape, the shape has
+// no head bone, bad counts or indices, the material NIF has no lit shape; the
+// log says which). Game main thread.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_AddHeadExtraShape(uint32_t actor, const SkyrimRenderer_ExtraShapeDesc* desc);
+
+// The extra's positions: vertexCount * 3 floats, absolute (OFFSETS does not
+// apply to extras), writable under the same rules as HeadShapeInfo.positions.
+// Uploaded at the next render when changed. Valid until the extra is removed
+// (see Lifetime). NULL for an unknown actor or extra.
+SKYRIMRENDERER_API float* SkyrimRenderer_GetHeadExtraPositions(uint32_t actor, int32_t extra);
+
+// Remove an extra shape. Unknown indices are ignored. Game main thread.
+SKYRIMRENDERER_API void SkyrimRenderer_RemoveHeadExtraShape(uint32_t actor, int32_t extra);
 
 // Turn a bone after the pose: a model-space rotation applied to the bone and
 // every bone under it after each pose (animation sample, bind pose, live

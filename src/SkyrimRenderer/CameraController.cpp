@@ -169,6 +169,7 @@ void CameraController::SetPreset(CameraPreset preset, const std::vector<LoadedMe
             int shaderEyes = 0, namedEyes = 0;
 
             for (const auto& m : meshes) {
+                if (m.extraId != 0) continue;  // a caller's extra shape is never a head part
                 float cx = (m.boundsMin[0] + m.boundsMax[0]) * 0.5f;
                 float cy = (m.boundsMin[1] + m.boundsMax[1]) * 0.5f;
                 float cz = (m.boundsMin[2] + m.boundsMax[2]) * 0.5f;
@@ -233,6 +234,7 @@ void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, cons
     float fMin[3] = {1e9f, 1e9f, 1e9f}, fMax[3] = {-1e9f, -1e9f, -1e9f};
     bool foundFace = false;
     for (const auto& m : meshes) {
+        if (m.extraId != 0) continue;  // a caller's extra shape is never a head part
         if (m.shadingModel != ShadingModel::FaceGen) continue;
         for (int a = 0; a < 3; ++a) {
             fMin[a] = std::min(fMin[a], m.boundsMin[a]);
@@ -258,6 +260,7 @@ void CameraController::FrameHeadShot(const std::vector<LoadedMesh>& meshes, cons
     const float hairCap = loose ? kLooseHairCap : kHeadShotHairCap;
     float top = fMax[2];
     for (const auto& m : meshes) {
+        if (m.extraId != 0) continue;  // a caller's extra shape is never a head part
         if (m.shadingModel != ShadingModel::HairTint && m.shadingModel != ShadingModel::EyeEnvMap) continue;
         top = std::max(top, std::min(m.boundsMax[2], fMax[2] + faceHeight * hairCap));
     }
@@ -312,6 +315,7 @@ bool CameraController::MeasureFace(const std::vector<LoadedMesh>& meshes, const 
     const LoadedMesh* mouth = nullptr;
     std::vector<const LoadedMesh*> eyes, eyesByName, brows;
     for (const auto& m : meshes) {
+        if (m.extraId != 0) continue;  // a caller's extra shape is never a head part
         if (m.shadingModel == ShadingModel::FaceGen) {
             if (!face || m.vertexCount > face->vertexCount) face = &m;
             continue;

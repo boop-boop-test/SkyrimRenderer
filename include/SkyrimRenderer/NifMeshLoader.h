@@ -274,6 +274,15 @@ struct LoadedMesh {
     uint32_t sourceSlotMask = 0;     // biped slots (ARMA slots for armor, the body part's slot)
     uint8_t  sourceKind = 0;         // SKYRIMRENDERER_PICK_* (SkyrimRendererAPI.h)
     uint8_t  sourceFlags = 0;        // SKYRIMRENDERER_PICKFLAG_*
+
+    /// Raw BSLightingShaderProperty flags (SLSF1, SLSF2) as stored in the NIF.
+    uint32_t nifShaderFlags[2] = {0, 0};
+    /// Blended SLSF1_DECAL shapes write depth (DEPTH_WRITE_DECALS) unless this
+    /// is false. Only extra shapes clear it (from their material's ZBuffer_Write).
+    bool decalDepthWrite = true;
+    /// Non-zero: an extra shape on a driven head (ActorPreview::AddHeadExtraShape),
+    /// id + 1. Not a head shape: never driven, morphed, framed or named as one.
+    int32_t extraId = 0;
 };
 
 /// Apply morph deltas to a vertex array in-place.

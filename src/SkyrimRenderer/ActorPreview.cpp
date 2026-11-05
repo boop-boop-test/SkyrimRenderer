@@ -1574,6 +1574,8 @@ bool ActorPreview::IsDrivableHeadMesh(const LoadedMesh& mesh) const {
 }
 
 void ActorPreview::BuildDrivenHead() {
+    // Extras go with the head they were added to: a new generation has none.
+    DropHeadExtrasLocked();
     drivenShapes_.clear();
     ++drivenGeneration_;
     const auto& partsByMesh = headPartsByMesh_;
@@ -1597,6 +1599,7 @@ void ActorPreview::BuildDrivenHead() {
     const auto& meshes = scene_.GetLoadedMeshes();
     for (uint32_t i = 0; i < meshes.size(); ++i) {
         const auto& mesh = meshes[i];
+        if (mesh.extraId != 0) continue;
         if (!headOnly_ && !IsDrivableHeadMesh(mesh)) continue;  // body, armor, held items
         if (!mesh.isGPUSkinned || mesh.vertexCount == 0 || mesh.bindPoseVertices.size() != mesh.vertexCount) {
             SKSE::log::info("[SkyrimRenderer] Head shape '{}' is not drivable (unskinned or no bind pose)", mesh.name);
@@ -1825,6 +1828,7 @@ uint32_t ActorPreview::CommitDrivenHead() {
         ds.pending = false;
         if (UploadMeshBindPose(ds.meshIndex, ds.staged.empty() ? nullptr : ds.staged.data())) ++uploaded;
     }
+    uploaded += CommitHeadExtrasLocked();
     headDriveDirty_ = false;
     return uploaded;
 }

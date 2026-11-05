@@ -18,6 +18,7 @@ struct SkyrimRenderer_HeadShapeInfo;
 struct SkyrimRenderer_HeadSourceInfo;
 struct SkyrimRenderer_LiveMirrorStatus;
 struct SkyrimRenderer_DressInfo;
+struct SkyrimRenderer_ExtraShapeDesc;
 
 namespace SkyrimRenderer {
 
@@ -268,6 +269,18 @@ public:
     /// Returns the shapes uploaded.
     uint32_t CommitDrivenHead();
 
+    // ── Extra shapes on a driven head (API 3) ──────────────────────────────
+    //
+    // A caller's own mesh drawn with a head shape's skinning (its head bone),
+    // positions rewritten by the caller. Dropped with the head: every
+    // BuildDrivenHead (generation change), ReloadHead, destruction.
+
+    /// Index >= 0, -1 refused. Game main thread.
+    int32_t AddHeadExtraShape(const SkyrimRenderer_ExtraShapeDesc& desc);
+    /// Writable vertexCount * 3 absolute positions; null for an unknown extra.
+    float* GetHeadExtraPositions(int32_t extra);
+    void RemoveHeadExtraShape(int32_t extra);
+
     // ── Bone overrides ──────────────────────────────────────────────────────
 
     /// Model-space rotation applied to a bone and everything under it after
@@ -453,6 +466,19 @@ private:
     bool headDriveDirty_ = false;          // flags changed: re-upload everything
     bool drivenHeadEnabled_ = false;       // full preview: SetHeadDriveFlags was called
     uint32_t drivenGeneration_ = 0;        // bumped by every BuildDrivenHead
+
+    // Extra shapes (AddHeadExtraShape). Their scene mesh carries extraId = id + 1.
+    struct HeadExtra {
+        std::string name;
+        std::vector<float> positions;      // caller-written, absolute, in the head shape's space
+        std::vector<float> uploaded;       // positions last sent to the GPU
+        bool stale = true;                 // upload at the next commit
+    };
+    std::unordered_map<int32_t, HeadExtra> headExtras_;
+    int32_t nextHeadExtraId_ = 0;
+    int32_t FindExtraMeshLocked(int32_t extra) const;  // scene mesh index, -1
+    void DropHeadExtrasLocked();                       // remove every extra and its mesh
+    uint32_t CommitHeadExtrasLocked();                 // upload changed extras; returns the count
     // Head part behind each loaded head mesh, by mesh name (from RebuildMeshes)
     std::unordered_map<std::string, RE::BGSHeadPart*> headPartsByMesh_;
 

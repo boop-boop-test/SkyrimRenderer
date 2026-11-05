@@ -737,6 +737,21 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_ReloadActorHead(uint32_t actor) {
     return a && Succeeded(a->ReloadHead()) ? 1 : 0;
 }
 
+SKYRIMRENDERER_API int32_t SkyrimRenderer_AddHeadExtraShape(uint32_t actor, const SkyrimRenderer_ExtraShapeDesc* desc) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    if (!a || !desc) return -1;
+    return a->AddHeadExtraShape(*desc);
+}
+
+SKYRIMRENDERER_API float* SkyrimRenderer_GetHeadExtraPositions(uint32_t actor, int32_t extra) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadExtraPositions(extra) : nullptr;
+}
+
+SKYRIMRENDERER_API void SkyrimRenderer_RemoveHeadExtraShape(uint32_t actor, int32_t extra) {
+    if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->RemoveHeadExtraShape(extra);
+}
+
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {
     auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
     return a ? a->GetHeadShapeGeneration() : 0;
