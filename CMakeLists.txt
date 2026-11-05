@@ -31,10 +31,13 @@ if(PROJECT_IS_TOP_LEVEL AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 endif()
 
 # CommonLibSSE: when consumed by a parent project, the parent already built this.
+# SKYRIMRENDERER_COMMONLIB_DIR picks another checkout (the MIT fork with Skyrim 1.7 support).
+set(SKYRIMRENDERER_COMMONLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibVR-ng"
+    CACHE PATH "CommonLibVR-ng checkout to build against")
 if(NOT TARGET CommonLibSSE::CommonLibSSE)
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibVR-ng/cmake/CommonLibSSE.cmake")
-    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibVR-ng"
+    include("${SKYRIMRENDERER_COMMONLIB_DIR}/cmake/CommonLibSSE.cmake")
+    add_subdirectory("${SKYRIMRENDERER_COMMONLIB_DIR}"
                      "${CMAKE_CURRENT_BINARY_DIR}/CommonLibVR-ng")
 endif()
 

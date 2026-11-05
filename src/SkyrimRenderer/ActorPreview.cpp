@@ -2064,12 +2064,11 @@ ActorPreview::CompositePlayerTintLayers(ID3D11Device* device, const RE::Color& b
     if (!player) return nullptr;
 
     // Access tint mask array using the same pattern as skin tone extraction
-    auto* overlayTints = REL::RelocateMemberIfNewer<RE::BSTArray<RE::TintMask*>*>(
-        SKSE::RUNTIME_SSE_1_6_629, player, 0xB28, 0xB30);
-    RE::BSTArray<RE::TintMask*>* tintList = overlayTints
-        ? overlayTints
-        : &REL::RelocateMemberIfNewer<RE::BSTArray<RE::TintMask*>>(
-              SKSE::RUNTIME_SSE_1_6_629, player, 0xB10, 0xB18);
+    // The runtime-data accessor knows each version's offsets (SE, AE, 1.7: +8 from AE).
+    auto& playerData = player->GetPlayerRuntimeData();
+    RE::BSTArray<RE::TintMask*>* tintList = playerData.overlayTintMasks
+        ? playerData.overlayTintMasks
+        : &playerData.tintMasks;
     // Without a SkinTone layer the face takes the skin colour the body has
     // (QNAM, which the engine keeps equal to the SkinTone layer's colour).
     const bool hasBodyTint = bodyTint.red > 0 || bodyTint.green > 0 || bodyTint.blue > 0;
@@ -2769,12 +2768,11 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
     if (baseNPC_->IsPlayer() && !REL::Module::IsVR()) {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (player) {
-            auto* overlayTints = REL::RelocateMemberIfNewer<RE::BSTArray<RE::TintMask*>*>(
-                SKSE::RUNTIME_SSE_1_6_629, player, 0xB28, 0xB30);
-            RE::BSTArray<RE::TintMask*>* tintList = overlayTints
-                ? overlayTints
-                : &REL::RelocateMemberIfNewer<RE::BSTArray<RE::TintMask*>>(
-                      SKSE::RUNTIME_SSE_1_6_629, player, 0xB10, 0xB18);
+            // The runtime-data accessor knows each version's offsets (SE, AE, 1.7: +8 from AE).
+            auto& playerData = player->GetPlayerRuntimeData();
+            RE::BSTArray<RE::TintMask*>* tintList = playerData.overlayTintMasks
+                ? playerData.overlayTintMasks
+                : &playerData.tintMasks;
             if (tintList) {
                 for (auto* mask : *tintList) {
                     if (mask && mask->type == RE::TintMask::Type::kSkinTone) {
