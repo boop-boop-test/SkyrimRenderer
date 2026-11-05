@@ -220,6 +220,86 @@ std::string ActorPreview::FirstSkeletonNode(std::initializer_list<const char*> n
     return fallback;
 }
 
+void ActorPreview::PlaceRigidMesh(LoadedMesh& mesh, const std::string& bone) const {
+    mesh.skinData.boneNames = {bone};
+
+    // Without the node in the pose, MeshRenderer places a bone at
+    // inverse(globalToSkin * skinToBone): make that the node's bind pose.
+    BoneTransform bind;
+    if (auto it = nifBindPoseFallback_.find(bone); it != nifBindPoseFallback_.end()) bind = it->second;
+    const BoneTransform& shapeToRoot = mesh.skinData.skinToBone[0];
+    mesh.skinData.globalToSkin = shapeToRoot.Compose(bind).Inverse();
+
+    // Bounds: the NIF-root box carried onto the node's bind pose.
+    float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+    for (int c = 0; c < 8; ++c) {
+        const float corner[3] = {(c & 1) ? mesh.boundsMax[0] : mesh.boundsMin[0],
+                                 (c & 2) ? mesh.boundsMax[1] : mesh.boundsMin[1],
+                                 (c & 4) ? mesh.boundsMax[2] : mesh.boundsMin[2]};
+        float p[3];
+        bind.TransformPoint(corner, p);
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::min(lo[a], p[a]);
+            hi[a] = std::max(hi[a], p[a]);
+        }
+    }
+    std::copy_n(lo, 3, mesh.boundsMin);
+    std::copy_n(hi, 3, mesh.boundsMax);
+}
+
+void ActorPreview::AttachRigidArmor(const std::vector<RigidArmorModel>& models) {
+    if (models.empty() || !scene_.GetDevice()) return;
+    EnsureNifSkeleton();  // node lookups and bind poses
+
+    auto& meshes = scene_.GetLoadedMeshesMut();
+    for (const auto& model : models) {
+        // The node the model names for itself, else the shield node for a
+        // shield (as the engine places one without "Prn").
+        std::string node = NifAttachNode(model.path);
+        if (!node.empty() && nifSkeleton_.FindBone(node) < 0) {
+            SKSE::log::info("[SkyrimRenderer] Armor 0x{:X} '{}': attach node '{}' not in the skeleton", model.formID,
+                            model.path, node);
+            node.clear();
+        }
+        if (node.empty() && (model.slots & kShieldSlot)) node = FirstSkeletonNode({"SHIELD"}, kLeftHand);
+        if (node.empty()) {
+            SKSE::log::info("[SkyrimRenderer] Armor 0x{:X} '{}': unskinned shapes with no attach node; left as stored",
+                            model.formID, model.path);
+            continue;
+        }
+
+        std::vector<LoadedMesh> rigid;
+        if (!LoadRigidNifMeshes(model.path, scene_.GetDevice(), RigidAttach{node, {}}, rigid)) continue;
+
+        // Replace the unskinned meshes in place (same count and order: the
+        // indices other bookkeeping holds stay valid). Skinned shapes of the
+        // same model keep their skinning.
+        uint32_t attached = 0;
+        for (auto& r : rigid) {
+            for (auto& mesh : meshes) {
+                if (mesh.owner != this || mesh.sourceFormID != model.formID || mesh.tag != MeshTag::Equipment ||
+                    mesh.skinData.HasSkinning() || mesh.isGPUSkinned || mesh.name != r.name ||
+                    mesh.vertexCount != r.vertexCount) {
+                    continue;
+                }
+                PlaceRigidMesh(r, node);
+                mesh.vertexBuffer = r.vertexBuffer;
+                mesh.vertexStride = r.vertexStride;
+                mesh.isGPUSkinned = true;
+                mesh.isDynamic = false;
+                mesh.skinData = r.skinData;
+                mesh.bindPoseVertices = r.bindPoseVertices;
+                std::copy_n(r.boundsMin, 3, mesh.boundsMin);
+                std::copy_n(r.boundsMax, 3, mesh.boundsMax);
+                ++attached;
+                break;
+            }
+        }
+        SKSE::log::info("[SkyrimRenderer] Armor 0x{:X} '{}': {} rigid shapes on '{}'", model.formID, model.path,
+                        attached, node);
+    }
+}
+
 std::pair<std::string, std::string> ActorPreview::ResolveHeldNodes(const HeldItem& item) const {
     const bool left = item.hand == HeldHand::Left;
 
@@ -298,30 +378,7 @@ void ActorPreview::LoadHeldItemMeshes() {
         for (LoadedMesh mesh : cached->second) {
             const bool scabbard = (mesh.sourceFlags & SKYRIMRENDERER_PICKFLAG_SCABBARD) != 0;
             const std::string& bone = (scabbard && !scabbardNode.empty()) ? scabbardNode : node;
-            mesh.skinData.boneNames = {bone};
-
-            // Without the node in the pose, MeshRenderer places a bone at
-            // inverse(globalToSkin * skinToBone): make that the node's bind pose.
-            BoneTransform bind;
-            if (auto it = nifBindPoseFallback_.find(bone); it != nifBindPoseFallback_.end()) bind = it->second;
-            const BoneTransform& shapeToRoot = mesh.skinData.skinToBone[0];
-            mesh.skinData.globalToSkin = shapeToRoot.Compose(bind).Inverse();
-
-            // Bounds: the NIF-root box carried onto the node's bind pose.
-            float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
-            for (int c = 0; c < 8; ++c) {
-                const float corner[3] = {(c & 1) ? mesh.boundsMax[0] : mesh.boundsMin[0],
-                                         (c & 2) ? mesh.boundsMax[1] : mesh.boundsMin[1],
-                                         (c & 4) ? mesh.boundsMax[2] : mesh.boundsMin[2]};
-                float p[3];
-                bind.TransformPoint(corner, p);
-                for (int a = 0; a < 3; ++a) {
-                    lo[a] = std::min(lo[a], p[a]);
-                    hi[a] = std::max(hi[a], p[a]);
-                }
-            }
-            std::copy_n(lo, 3, mesh.boundsMin);
-            std::copy_n(hi, 3, mesh.boundsMax);
+            PlaceRigidMesh(mesh, bone);
 
             mesh.tag = MeshTag::Equipment;
             mesh.owner = this;

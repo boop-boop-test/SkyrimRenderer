@@ -36,4 +36,9 @@ struct RigidAttach {
 bool LoadRigidNifMeshes(const std::string& meshPath, ID3D11Device* device,
                         const RigidAttach& attach, std::vector<LoadedMesh>& outMeshes);
 
+/// The node an unskinned model names for itself: the root's NiStringExtraData
+/// "Prn" (vanilla shields: "SHIELD"; weapons: their sheath node). Empty when
+/// the file has none or cannot be read.
+std::string NifAttachNode(const std::string& meshPath);
+
 }  // namespace SkyrimRenderer

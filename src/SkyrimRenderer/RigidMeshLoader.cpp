@@ -38,6 +38,20 @@ bool IsUnderScabbard(const Nif::File& nif, int32_t shapeIndex) {
 
 }  // namespace
 
+std::string NifAttachNode(const std::string& meshPath) {
+    std::string fileData;
+    if (!ReadWholeGameFile(meshPath.c_str(), fileData, 256 * 1024)) return {};
+    auto nif = Nif::File::Parse(reinterpret_cast<const uint8_t*>(fileData.data()), fileData.size());
+    if (!nif) return {};
+    const auto* root = nif->GetObject(nif->Root());
+    if (!root) return {};
+    for (int32_t block : root->extraData) {
+        const auto* extra = nif->GetStringExtraData(block);
+        if (extra && _stricmp(extra->name.c_str(), "Prn") == 0) return extra->value;
+    }
+    return {};
+}
+
 bool LoadRigidNifMeshes(const std::string& meshPath, ID3D11Device* device,
                         const RigidAttach& attach, std::vector<LoadedMesh>& outMeshes) {
     if (!device || attach.bone.empty()) return false;

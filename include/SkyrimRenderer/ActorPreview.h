@@ -535,6 +535,19 @@ private:
     // Node a held item hangs from (and its scabbard), for the current drawn state.
     std::pair<std::string, std::string> ResolveHeldNodes(const HeldItem& item) const;
     std::string FirstSkeletonNode(std::initializer_list<const char*> names, const char* fallback) const;
+    // A rigid mesh from LoadRigidNifMeshes onto `bone`: palette entry, bind-pose
+    // fallback for a pose without the node, bounds moved onto the node.
+    void PlaceRigidMesh(LoadedMesh& mesh, const std::string& bone) const;
+
+    // Armor models with unskinned shapes (vanilla shields): the engine hangs
+    // them from the node their root names ("Prn"), not from the skin. Collected
+    // by RebuildMeshes, attached at its end (AttachRigidArmor).
+    struct RigidArmorModel {
+        std::string path;
+        RE::FormID formID = 0;
+        uint32_t slots = 0;
+    };
+    void AttachRigidArmor(const std::vector<RigidArmorModel>& models);
 
     mutable std::mutex mutex_;
 };

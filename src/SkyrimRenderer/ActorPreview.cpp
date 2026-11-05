@@ -2554,6 +2554,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
 
     // Stamp every loaded mesh with its source (before baked FaceGen parts are
     // dropped below: indices are still the batch's).
+    std::vector<RigidArmorModel> rigidArmor;
     {
         if (faceGenBatchIndex != SIZE_MAX) {
             requestSources[faceGenBatchIndex] = {static_cast<uint8_t>(SKYRIMRENDERER_PICK_BODY), 0, 1u << 0};
@@ -2567,6 +2568,7 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
         auto& loaded = scene_.GetLoadedMeshesMut();
         for (size_t r = 0; r < batchRequests.size(); ++r) {
             const auto src = requestSources.find(r);
+            bool rigid = false;
             for (uint32_t j = 0; j < batchRequests[r].meshCount; ++j) {
                 const uint32_t idx = batchRequests[r].meshStartIndex + j;
                 if (idx >= loaded.size()) break;
@@ -2577,6 +2579,11 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                     mesh.sourceFormID = src->second.formID;
                     mesh.sourceSlotMask = src->second.slots;
                 }
+                rigid = rigid || (!mesh.skinData.HasSkinning() && !mesh.isGPUSkinned && !mesh.isEffect);
+            }
+            if (rigid && useGPUSkinning_ && src != requestSources.end() &&
+                src->second.kind == SKYRIMRENDERER_PICK_ARMOR) {
+                rigidArmor.push_back({batchRequests[r].path, src->second.formID, src->second.slots});
             }
         }
     }
@@ -3004,6 +3011,10 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
                             totalMerged, nifSkeleton_.bones.size());
         }
     }
+
+    // Unskinned armor (vanilla shields) hangs from its node, as in the game;
+    // drawn as stored it sat at the actor's feet.
+    AttachRigidArmor(rigidArmor);
 
     // Held items (weapons, torch, ammo) outlive outfit rebuilds.
     LoadHeldItemMeshes();

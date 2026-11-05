@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.11.0
+    VERSION 1.11.1
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 
@@ -224,9 +224,10 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 
 ###############################################################################
-# Distribution — populate contrib/ for FOMOD packaging (standalone only)
+# Distribution — populate contrib/ for FOMOD packaging (standalone only, against the default CommonLib:
+# a build against another checkout, such as the 1.7 fork, must not replace the packaged DLL)
 ###############################################################################
-if(PROJECT_IS_TOP_LEVEL)
+if(PROJECT_IS_TOP_LEVEL AND SKYRIMRENDERER_COMMONLIB_DIR STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibVR-ng")
     set(DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/contrib/Distribution")
 
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
