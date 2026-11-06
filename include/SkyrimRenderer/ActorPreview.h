@@ -299,7 +299,9 @@ public:
     uint32_t GetHeadShapeTexture(uint32_t shape, uint32_t slot);
     /// The shape's own texture in a slot (never an override), sampled as the
     /// engine samples it (the diffuse's raw view). Null when it has none.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetHeadShapeOwnTexture(uint32_t shape, uint32_t slot);
+    /// why (optional): the reason when null, else the shape's name.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetHeadShapeOwnTexture(uint32_t shape, uint32_t slot,
+                                                                             std::string* why = nullptr);
 
     // ── Bone overrides ──────────────────────────────────────────────────────
 

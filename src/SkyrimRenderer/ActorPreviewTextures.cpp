@@ -6,6 +6,7 @@
 #include "SkyrimRenderer/TextureCache.h"
 
 #include <algorithm>
+#include <format>
 #include <string>
 
 #include <RE/Skyrim.h>
@@ -214,15 +215,24 @@ uint32_t ActorPreview::GetHeadShapeTexture(uint32_t shape, uint32_t slot) {
 }
 
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ActorPreview::GetHeadShapeOwnTexture(uint32_t shape,
-                                                                                       uint32_t slot) {
+                                                                                       uint32_t slot,
+                                                                                       std::string* why) {
+    auto fail = [&](std::string reason) {
+        if (why) *why = std::move(reason);
+        return SRV();
+    };
     std::lock_guard lock(mutex_);
-    if (!HasDrivenHead()) return nullptr;
+    if (!HasDrivenHead()) return fail("no driven head (a head actor, or SetHeadDriveFlags on a full preview)");
     ValidateDrivenHeadLocked();
     std::string name;
     uint32_t ordinal = 0;
-    if (!ShapeKeyLocked(shape, name, ordinal) || !ValidSlot(slot)) return nullptr;
+    if (!ShapeKeyLocked(shape, name, ordinal)) {
+        return fail(std::format("not a head shape index ({} shapes)", drivenShapes_.size()));
+    }
+    if (!ValidSlot(slot)) return fail("not an overridable slot (0-3, 5-7)");
+    if (why) *why = std::format("'{}'", name);
     LoadedMesh* mesh = OverrideMeshLocked(name, ordinal);
-    if (!mesh) return nullptr;
+    if (!mesh) return fail(std::format("the mesh of shape '{}' is not in the scene", name));
     if (slot == SKYRIMRENDERER_TEXSLOT_DIFFUSE && !mesh->diffuseTexturePath.empty()) {
         // The preview's own diffuse view decodes sRGB; the engine samples raw.
         if (auto* device = scene_.GetDevice()) {
@@ -230,9 +240,14 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ActorPreview::GetHeadShapeOwnTe
         }
     }
     for (const auto& o : textureOverrides_) {
-        if (o.bound && o.meshName == name && o.ordinal == ordinal && o.slot == slot) return o.original;
+        if (o.bound && o.meshName == name && o.ordinal == ordinal && o.slot == slot) {
+            if (!o.original) return fail(std::format("'{}' has no texture in that slot (under an override)", name));
+            return o.original;
+        }
     }
-    return *SlotView(*mesh, slot);
+    SRV own = *SlotView(*mesh, slot);
+    if (!own) return fail(std::format("'{}' has no texture in that slot", name));
+    return own;
 }
 
 }  // namespace SkyrimRenderer

@@ -780,9 +780,31 @@ SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeTexture(uint32_t actor, u
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot) {
     const auto caller = SKYRIMRENDERER_CALLER;
     auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
-    if (!a) return 0;
-    auto srv = a->GetHeadShapeOwnTexture(shape, slot);
-    return srv ? GpuWork::Get().WrapSRV(caller, srv.Get()) : 0;
+    if (!a) {
+        SKSE::log::warn("[SkyrimRenderer] WrapHeadShapeTexture actor {} shape {} slot {}: 0, unknown actor", actor,
+                        shape, slot);
+        return 0;
+    }
+    std::string why;
+    auto srv = a->GetHeadShapeOwnTexture(shape, slot, &why);
+    if (!srv) {
+        SKSE::log::warn("[SkyrimRenderer] WrapHeadShapeTexture actor {} shape {} slot {}: 0, {}", actor, shape, slot,
+                        why);
+        return 0;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    srv->GetDesc(&view);
+    const uint32_t handle = GpuWork::Get().WrapSRV(caller, srv.Get());
+    if (!handle) {
+        SKSE::log::warn("[SkyrimRenderer] WrapHeadShapeTexture actor {} shape {} {} slot {}: 0, the view is not a 2D "
+                        "texture (format {}, dimension {})",
+                        actor, shape, why, slot, static_cast<uint32_t>(view.Format),
+                        static_cast<uint32_t>(view.ViewDimension));
+        return 0;
+    }
+    SKSE::log::info("[SkyrimRenderer] WrapHeadShapeTexture actor {} shape {} {} slot {}: handle {} (format {})", actor,
+                    shape, why, slot, handle, static_cast<uint32_t>(view.Format));
+    return handle;
 }
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {
