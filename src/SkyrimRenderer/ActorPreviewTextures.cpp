@@ -4,6 +4,7 @@
 #include "SkyrimRenderer/ActorPreview.h"
 #include "SkyrimRenderer/GpuWork.h"
 #include "SkyrimRenderer/TextureCache.h"
+#include "SkyrimRenderer/WriteWatch.h"
 
 #include <algorithm>
 #include <format>
@@ -247,6 +248,7 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ActorPreview::GetHeadShapeOwnTe
     }
     SRV own = *SlotView(*mesh, slot);
     if (!own) {
+        WriteWatchReport();
         const auto& all = scene_.GetLoadedMeshes();
         return fail(std::format("'{}' has no texture in that slot (mesh #{} of {}, shading {}, diffuse '{}', views "
                                 "d{} n{} sk{} det{} tint{} spec{})",

@@ -1,4 +1,5 @@
 #include "SkyrimRenderer/ActorPreview.h"
+#include "SkyrimRenderer/WriteWatch.h"
 
 #include <bit>
 #include <chrono>
@@ -1609,7 +1610,11 @@ void ActorPreview::BuildDrivenHead() {
         ds.meshIndex = i;
         ds.meshName = mesh.name;
         ds.tintSeen = mesh.tintSRV.Get();
-        if (mesh.tintSRV) scene_.GetLoadedMeshesMut()[i].tintSRV.watch = true;
+        if (mesh.tintSRV) {
+            auto& watched = scene_.GetLoadedMeshesMut()[i];
+            watched.tintSRV.watch = true;
+            if (watched.shadingModel == ShadingModel::FaceGen) WriteWatchArm(std::addressof(watched.tintSRV));
+        }
         if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) ds.part = it->second;
         else if (auto it2 = byEditorID.find(mesh.name); it2 != byEditorID.end()) ds.part = it2->second;
 
@@ -1866,6 +1871,7 @@ uint32_t ActorPreview::CommitDrivenHead() {
     uint32_t uploaded = 0;
     {
         // Diagnostic: a driven shape whose tint view changed since the last commit.
+        WriteWatchReport();
         const auto& all = scene_.GetLoadedMeshes();
         for (auto& ds : drivenShapes_) {
             if (ds.meshIndex >= all.size()) continue;
