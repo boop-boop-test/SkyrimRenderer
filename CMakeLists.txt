@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.13.2
+    VERSION 1.13.3
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 

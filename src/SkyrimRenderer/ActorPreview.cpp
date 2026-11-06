@@ -1608,6 +1608,8 @@ void ActorPreview::BuildDrivenHead() {
         DrivenShape ds;
         ds.meshIndex = i;
         ds.meshName = mesh.name;
+        ds.tintSeen = mesh.tintSRV.Get();
+        if (mesh.tintSRV) scene_.GetLoadedMeshesMut()[i].tintSRV.watch = true;
         if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) ds.part = it->second;
         else if (auto it2 = byEditorID.find(mesh.name); it2 != byEditorID.end()) ds.part = it2->second;
 
@@ -1862,6 +1864,19 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
 
 uint32_t ActorPreview::CommitDrivenHead() {
     uint32_t uploaded = 0;
+    {
+        // Diagnostic: a driven shape whose tint view changed since the last commit.
+        const auto& all = scene_.GetLoadedMeshes();
+        for (auto& ds : drivenShapes_) {
+            if (ds.meshIndex >= all.size()) continue;
+            const void* now = all[ds.meshIndex].tintSRV.Get();
+            if (now != ds.tintSeen) {
+                SKSE::log::warn("[SkyrimRenderer] TRACE 0x{:X} '{}' (mesh #{}): tint view {} -> {} since the last "
+                                "render", actorFormID_, ds.meshName, ds.meshIndex, ds.tintSeen, now);
+                ds.tintSeen = now;
+            }
+        }
+    }
     for (auto& ds : drivenShapes_) {
         if (!ds.pending) continue;
         ds.pending = false;

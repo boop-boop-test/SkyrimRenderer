@@ -12,6 +12,8 @@
 #include <DDSTextureLoader.h>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <format>
 #include <future>
 #include <cmath>
 #include <optional>
@@ -20,6 +22,27 @@
 #include <vector>
 
 namespace SkyrimRenderer {
+
+void ReportWatchedViewDrop(const char* how, const void* view) {
+    void* frames[24]{};
+    const USHORT count = RtlCaptureStackBackTrace(1, 24, frames, nullptr);
+    std::string trace;
+    for (USHORT i = 0; i < count; ++i) {
+        HMODULE module = nullptr;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(frames[i]), &module) && module) {
+            char path[MAX_PATH]{};
+            GetModuleFileNameA(module, path, MAX_PATH);
+            const char* base = std::strrchr(path, '\\');
+            strncpy_s(name, base ? base + 1 : path, _TRUNCATE);
+        }
+        trace += std::format(" {}+0x{:X}", name,
+                             reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(module));
+    }
+    SKSE::log::warn("[SkyrimRenderer] TRACE watched tint view {} {} on thread {}:{}", view, how, GetCurrentThreadId(),
+                    trace);
+}
 
 // Parses a NIF read from the game's file system; logs why it failed.
 static std::optional<Nif::File> ParseNif(const std::string& fileData, const std::string& path) {

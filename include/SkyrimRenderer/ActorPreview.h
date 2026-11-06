@@ -480,6 +480,7 @@ private:
         std::vector<uint8_t> staged;       // SkinnedVertex image built by PrepareDrivenShape
         std::vector<std::array<float, 3>> normalScratch;  // RecomputeNormals accumulator, reused
         std::string meshName;              // the mesh's name when built (stale check)
+        const void* tintSeen = nullptr;    // diagnostic: tint view at the last commit
         bool pending = false;              // prepared, not yet uploaded
         bool stale = false;                // a prep threw after `uploaded` changed: redo it
     };

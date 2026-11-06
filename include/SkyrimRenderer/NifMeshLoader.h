@@ -19,6 +19,52 @@
 
 namespace SkyrimRenderer {
 
+/// Logs the caller's stack (module + offset per frame) for a watched view
+/// that is dropped; `how` names the operation. NifMeshLoader.cpp.
+void ReportWatchedViewDrop(const char* how, const void* view);
+
+/// Diagnostic: a ComPtr<SRV> that reports when a watched value is replaced
+/// by another (or by null) through renderer code. Copies are not watched;
+/// moves carry the watch (vector reallocation).
+struct WatchedSRV : Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> {
+    using Base = Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>;
+    bool watch = false;
+
+    WatchedSRV() = default;
+    WatchedSRV(const Base& b) : Base(b) {}
+    WatchedSRV(const WatchedSRV& o) : Base(static_cast<const Base&>(o)) {}
+    WatchedSRV(WatchedSRV&& o) noexcept : Base(std::move(static_cast<Base&>(o))), watch(o.watch) {}
+    WatchedSRV& operator=(const WatchedSRV& o) {
+        Check(o.Get(), "copy-assigned");
+        Base::operator=(static_cast<const Base&>(o));
+        return *this;
+    }
+    WatchedSRV& operator=(WatchedSRV&& o) noexcept {
+        Check(o.Get(), "move-assigned");
+        Base::operator=(std::move(static_cast<Base&>(o)));
+        return *this;
+    }
+    WatchedSRV& operator=(const Base& b) {
+        Check(b.Get(), "assigned");
+        Base::operator=(b);
+        return *this;
+    }
+    WatchedSRV& operator=(std::nullptr_t) {
+        Check(nullptr, "assigned null");
+        Base::operator=(nullptr);
+        return *this;
+    }
+    unsigned long Reset() {
+        Check(nullptr, "Reset");
+        return Base::Reset();
+    }
+
+private:
+    void Check(ID3D11ShaderResourceView* next, const char* how) const {
+        if (watch && Get() && Get() != next) ReportWatchedViewDrop(how, Get());
+    }
+};
+
 /// Vertex layout for our custom preview shader.
 /// Position + normal + UV + vertex color for lighting.
 struct PreviewVertex {
@@ -157,7 +203,7 @@ struct LoadedMesh {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normalSRV;    // slot 1: model-space normal   [linear]
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> skSRV;        // slot 2: soft/rim/back mask   [linear]
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> detailSRV;    // slot 3: FaceGen detail map   [linear]
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tintSRV;      // slot 6: FaceGen tint overlay [linear — shader manages gamma]
+    WatchedSRV tintSRV;      // slot 6: FaceGen tint overlay [linear — shader manages gamma] (watched: see ReportWatchedViewDrop)
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> envMaskSRV;   // slot 5: environment mask     [linear]
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specularSRV;  // slot 7: specular (_S)        [linear]
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> backlightSRV; // slot 9: back-light mask     [linear]
