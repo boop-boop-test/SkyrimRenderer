@@ -1,5 +1,4 @@
 #include "SkyrimRenderer/ActorPreview.h"
-#include "SkyrimRenderer/WriteWatch.h"
 
 #include <bit>
 #include <chrono>
@@ -1609,12 +1608,6 @@ void ActorPreview::BuildDrivenHead() {
         DrivenShape ds;
         ds.meshIndex = i;
         ds.meshName = mesh.name;
-        ds.tintSeen = mesh.tintSRV.Get();
-        if (mesh.tintSRV) {
-            auto& watched = scene_.GetLoadedMeshesMut()[i];
-            watched.tintSRV.watch = true;
-            if (watched.shadingModel == ShadingModel::FaceGen) WriteWatchArm(std::addressof(watched.tintSRV));
-        }
         if (auto it = partsByMesh.find(mesh.name); it != partsByMesh.end()) ds.part = it->second;
         else if (auto it2 = byEditorID.find(mesh.name); it2 != byEditorID.end()) ds.part = it2->second;
 
@@ -1632,12 +1625,10 @@ void ActorPreview::BuildDrivenHead() {
         if (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) ds.positions.assign(n * 3, 0.0f);
         else ds.positions = ds.rest;
 
-        SKSE::log::info("[SkyrimRenderer] Head shape {} '{}': {} verts, head part {} (type {}), mesh #{} "
-                        "diffuse '{}' tint {}",
+        SKSE::log::info("[SkyrimRenderer] Head shape {} '{}': {} verts, head part {} (type {})",
                         drivenShapes_.size(), mesh.name, n,
                         ds.part && ds.part->GetFormEditorID() ? ds.part->GetFormEditorID() : "(none)",
-                        ds.part ? static_cast<int>(ds.part->type.get()) : -1, i, mesh.diffuseTexturePath,
-                        static_cast<const void*>(mesh.tintSRV.Get()));
+                        ds.part ? static_cast<int>(ds.part->type.get()) : -1);
         drivenShapes_.push_back(std::move(ds));
     }
 }
@@ -1869,20 +1860,6 @@ uint32_t ActorPreview::PrepareDrivenShape(uint32_t shape) {
 
 uint32_t ActorPreview::CommitDrivenHead() {
     uint32_t uploaded = 0;
-    {
-        // Diagnostic: a driven shape whose tint view changed since the last commit.
-        WriteWatchReport();
-        const auto& all = scene_.GetLoadedMeshes();
-        for (auto& ds : drivenShapes_) {
-            if (ds.meshIndex >= all.size()) continue;
-            const void* now = all[ds.meshIndex].tintSRV.Get();
-            if (now != ds.tintSeen) {
-                SKSE::log::warn("[SkyrimRenderer] TRACE 0x{:X} '{}' (mesh #{}): tint view {} -> {} since the last "
-                                "render", actorFormID_, ds.meshName, ds.meshIndex, ds.tintSeen, now);
-                ds.tintSeen = now;
-            }
-        }
-    }
     for (auto& ds : drivenShapes_) {
         if (!ds.pending) continue;
         ds.pending = false;
@@ -3039,12 +3016,12 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             case ShadingModel::TruePBR:    modelName = "TruePBR";    break;
         }
         SKSE::log::info("[SkyrimRenderer] Mesh '{}': shading={} tint=({:.3f},{:.3f},{:.3f}) "
-                        "specStr={:.3f} specColor=({:.3f},{:.3f},{:.3f}) flags=0x{:X} tintTex {}",
+                        "specStr={:.3f} specColor=({:.3f},{:.3f},{:.3f}) flags=0x{:X}",
                         mesh.name, modelName,
                         mesh.tintColor[0], mesh.tintColor[1], mesh.tintColor[2],
                         mesh.specularStrength,
                         mesh.specularColorRGB[0], mesh.specularColorRGB[1], mesh.specularColorRGB[2],
-                        static_cast<uint32_t>(mesh.shaderFlags), static_cast<const void*>(mesh.tintSRV.Get()));
+                        static_cast<uint32_t>(mesh.shaderFlags));
     }
 
     scene_.SetCameraPreset(CameraPreset::FullBody);

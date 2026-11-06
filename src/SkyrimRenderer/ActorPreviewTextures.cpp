@@ -4,10 +4,10 @@
 #include "SkyrimRenderer/ActorPreview.h"
 #include "SkyrimRenderer/GpuWork.h"
 #include "SkyrimRenderer/TextureCache.h"
-#include "SkyrimRenderer/WriteWatch.h"
 
 #include <algorithm>
 #include <format>
+#include <memory>
 #include <string>
 
 #include <RE/Skyrim.h>
@@ -23,15 +23,17 @@ using SRV = Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>;
 
 /// The mesh's view for a NIF texture-set slot; null for a slot the preview
 /// does not draw from a texture set (4 = cubemap, 8, out of range).
+/// std::addressof, never &: ComPtr's operator& returns a ComPtrRef whose
+/// conversion to ComPtr* releases and nulls the view (an out-parameter helper).
 SRV* SlotView(LoadedMesh& mesh, uint32_t slot) {
     switch (slot) {
-    case SKYRIMRENDERER_TEXSLOT_DIFFUSE: return &mesh.diffuseSRV;
-    case SKYRIMRENDERER_TEXSLOT_NORMAL: return &mesh.normalSRV;
-    case SKYRIMRENDERER_TEXSLOT_SUBSURFACE: return &mesh.skSRV;
-    case SKYRIMRENDERER_TEXSLOT_DETAIL: return &mesh.detailSRV;
-    case SKYRIMRENDERER_TEXSLOT_ENV_MASK: return &mesh.envMaskSRV;
-    case SKYRIMRENDERER_TEXSLOT_TINT: return &mesh.tintSRV;
-    case SKYRIMRENDERER_TEXSLOT_SPECULAR: return &mesh.specularSRV;
+    case SKYRIMRENDERER_TEXSLOT_DIFFUSE: return std::addressof(mesh.diffuseSRV);
+    case SKYRIMRENDERER_TEXSLOT_NORMAL: return std::addressof(mesh.normalSRV);
+    case SKYRIMRENDERER_TEXSLOT_SUBSURFACE: return std::addressof(mesh.skSRV);
+    case SKYRIMRENDERER_TEXSLOT_DETAIL: return std::addressof(mesh.detailSRV);
+    case SKYRIMRENDERER_TEXSLOT_ENV_MASK: return std::addressof(mesh.envMaskSRV);
+    case SKYRIMRENDERER_TEXSLOT_TINT: return std::addressof(mesh.tintSRV);
+    case SKYRIMRENDERER_TEXSLOT_SPECULAR: return std::addressof(mesh.specularSRV);
     default: return nullptr;
     }
 }
@@ -247,16 +249,7 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ActorPreview::GetHeadShapeOwnTe
         }
     }
     SRV own = *SlotView(*mesh, slot);
-    if (!own) {
-        WriteWatchReport();
-        const auto& all = scene_.GetLoadedMeshes();
-        return fail(std::format("'{}' has no texture in that slot (mesh #{} of {}, shading {}, diffuse '{}', views "
-                                "d{} n{} sk{} det{} tint{} spec{})",
-                                name, mesh - all.data(), all.size(), static_cast<int>(mesh->shadingModel),
-                                mesh->diffuseTexturePath, mesh->diffuseSRV ? 1 : 0, mesh->normalSRV ? 1 : 0,
-                                mesh->skSRV ? 1 : 0, mesh->detailSRV ? 1 : 0, mesh->tintSRV ? 1 : 0,
-                                mesh->specularSRV ? 1 : 0));
-    }
+    if (!own) return fail(std::format("'{}' has no texture in that slot", name));
     return own;
 }
 
