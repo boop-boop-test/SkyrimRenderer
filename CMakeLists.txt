@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(
     SkyrimRenderer
-    VERSION 1.11.1
+    VERSION 1.12.0
     DESCRIPTION "Standalone offscreen 3D renderer for Skyrim NIF meshes."
     LANGUAGES CXX RC)
 
@@ -140,6 +140,7 @@ set(SKYRIM_RENDERER_SOURCES
     src/SkyrimRenderer/ActorPreviewHeldItems.cpp
     src/SkyrimRenderer/ActorPreviewDress.cpp
     src/SkyrimRenderer/ActorPreviewExtras.cpp
+    src/SkyrimRenderer/ActorPreviewTextures.cpp
     src/SkyrimRenderer/PickRenderer.cpp
     src/SkyrimRenderer/RenderScenePicking.cpp
     src/SkyrimRenderer/RigidMeshLoader.cpp

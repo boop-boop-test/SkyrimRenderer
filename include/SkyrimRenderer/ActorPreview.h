@@ -281,6 +281,23 @@ public:
     float* GetHeadExtraPositions(int32_t extra);
     void RemoveHeadExtraShape(int32_t extra);
 
+    // ── Head shape textures (API 4) ────────────────────────────────────────
+    //
+    // A GPU texture handle drawn in a head shape's texture-set slot instead of
+    // its own texture. Kept by shape name across rebuilds (generation changes,
+    // ReloadHead) and put on every render's commit; dropped when cleared, when
+    // the texture handle goes, and with the preview. Game main thread.
+
+    /// texture 0 clears. owner: the mod the texture handle belongs to.
+    bool SetHeadShapeTexture(uint32_t shape, uint32_t slot, uint32_t texture, std::uintptr_t owner);
+    /// slot SKYRIMRENDERER_TEXSLOT_ALL clears every slot of the shape.
+    bool ClearHeadShapeTexture(uint32_t shape, uint32_t slot);
+    /// The override's texture handle, 0 for none.
+    uint32_t GetHeadShapeTexture(uint32_t shape, uint32_t slot);
+    /// The shape's own texture in a slot (never an override), sampled as the
+    /// engine samples it (the diffuse's raw view). Null when it has none.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetHeadShapeOwnTexture(uint32_t shape, uint32_t slot);
+
     // ── Bone overrides ──────────────────────────────────────────────────────
 
     /// Model-space rotation applied to a bone and everything under it after
@@ -479,6 +496,24 @@ private:
     int32_t FindExtraMeshLocked(int32_t extra) const;  // scene mesh index, -1
     void DropHeadExtrasLocked();                       // remove every extra and its mesh
     uint32_t CommitHeadExtrasLocked();                 // upload changed extras; returns the count
+    // Texture overrides (SetHeadShapeTexture), keyed by the shape's mesh name
+    // and its ordinal among driven shapes of that name.
+    struct TextureOverride {
+        std::string meshName;
+        uint32_t ordinal = 0;
+        uint32_t slot = 0;
+        std::uintptr_t owner = 0;
+        uint32_t texture = 0;
+        bool bound = false;     // applied to the mesh it is on now; original is that mesh's own
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> original, originalCs;  // the mesh's own (Cs: slot 0 raw)
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> applied, appliedCs;    // what was put on the mesh
+        bool warnedDecode = false;
+    };
+    std::vector<TextureOverride> textureOverrides_;
+    bool ShapeKeyLocked(uint32_t shape, std::string& name, uint32_t& ordinal) const;
+    LoadedMesh* OverrideMeshLocked(const std::string& name, uint32_t ordinal);
+    void RestoreTextureOverrideLocked(TextureOverride& o);
+    void ApplyTextureOverridesLocked();  // every render's commit, and Set / Clear
     // Head part behind each loaded head mesh, by mesh name (from RebuildMeshes)
     std::unordered_map<std::string, RE::BGSHeadPart*> headPartsByMesh_;
 

@@ -112,7 +112,9 @@ extern "C" {
 //      ReloadActorHead, DressActor
 //   3  build 1.11.0: AddHeadExtraShape, GetHeadExtraPositions,
 //      RemoveHeadExtraShape
-#define SKYRIMRENDERER_API_VERSION 3
+//   4  build 1.12.0: SetHeadShapeTexture, ClearHeadShapeTexture,
+//      GetHeadShapeTexture, WrapHeadShapeTexture
+#define SKYRIMRENDERER_API_VERSION 4
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -694,6 +696,80 @@ SKYRIMRENDERER_API float* SkyrimRenderer_GetHeadExtraPositions(uint32_t actor, i
 
 // Remove an extra shape. Unknown indices are ignored. Game main thread.
 SKYRIMRENDERER_API void SkyrimRenderer_RemoveHeadExtraShape(uint32_t actor, int32_t extra);
+
+// ---- Head shape textures (API 4) ----
+//
+// A GPU texture (see "GPU materials") drawn in one of a driven head shape's
+// texture-set slots instead of the shape's own texture: the preview's
+// counterpart of putting a GPU output's engine texture into a game actor's
+// material (e.g. a recoloured FaceGen tint in the face's slot 6). The shape
+// keeps its own shading: an override of slot 6 is the face's tint, composed
+// over the diffuse by the FaceGen shading as in game.
+//
+// Slots are NIF texture-set slots (SKYRIMRENDERER_TEXSLOT_*): 0 diffuse,
+// 1 normal, 2 subsurface / glow / soft-light mask, 3 FaceGen detail,
+// 5 environment mask, 6 FaceGen tint, 7 specular. A slot draws only where the
+// shape's shading reads it, as in game: tint and detail on the FaceGen face,
+// the environment mask on eye and environment-map shapes. 4 (cubemap) and 8
+// are not overridable.
+//
+// Sampling: the values the texture's own view returns, as the engine samples
+// the same texture in that slot (for a GPU output with engineTexture = 1:
+// what a game material holding its engine texture samples). The diffuse
+// slot is decoded from sRGB as the preview decodes its own diffuse; an RGBA8
+// output does that exactly, any other texture whose view cannot be
+// reinterpreted is drawn as stored (logged once).
+//
+// Lifetime: kept by the shape's name (and its rank among head shapes of that
+// name), not by its index, so it stays on through ReloadActorHead and every
+// rebuild of the driven head (GetHeadShapeGeneration changing); after a
+// rebuild ask GetHeadShapeTexture with the new indices. While no shape of
+// that name exists (a hood hides the hair) it waits, and is drawn again when
+// one returns. It goes when cleared, when its texture handle is destroyed
+// (DestroyGpuObject, its instance destroyed, the mod's Shutdown;
+// GetHeadShapeTexture then returns 0), and with DestroyActorPreview. Until
+// the texture has contents (an output before its first run) the shape draws
+// its own texture; while an output runs again it keeps the last contents.
+// Contents changed by later runs show at the next render, nothing to call.
+//
+// Game main thread, for every call here.
+
+#define SKYRIMRENDERER_TEXSLOT_DIFFUSE    0u
+#define SKYRIMRENDERER_TEXSLOT_NORMAL     1u
+#define SKYRIMRENDERER_TEXSLOT_SUBSURFACE 2u
+#define SKYRIMRENDERER_TEXSLOT_DETAIL     3u
+#define SKYRIMRENDERER_TEXSLOT_ENV_MASK   5u
+#define SKYRIMRENDERER_TEXSLOT_TINT       6u
+#define SKYRIMRENDERER_TEXSLOT_SPECULAR   7u
+#define SKYRIMRENDERER_TEXSLOT_ALL        0xFFFFFFFFu  // ClearHeadShapeTexture: every slot of the shape
+
+// Draw `texture` (a GPU texture handle of the calling mod: an instance output,
+// a wrapped or a loaded texture) in `slot` of head shape `shape` (a
+// GetHeadShapeInfo index) of a head actor, or of a full preview with a driven
+// head. Replaces an earlier override of that slot; texture 0 clears it.
+// Returns 1, 0 when refused (unknown actor, no driven head, bad index or slot,
+// not a texture handle of this mod; the log says which).
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot,
+                                                               uint32_t texture);
+
+// The shape draws its own texture in `slot` again (SKYRIMRENDERER_TEXSLOT_ALL:
+// in every slot). Returns 1 (also when there was none), 0 for an unknown actor,
+// shape or slot.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_ClearHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot);
+
+// The texture handle drawn in `slot` of `shape`, 0 when there is no override
+// (never set, cleared, or dropped because its texture handle went).
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot);
+
+// A new GPU texture handle (as WrapGpuTextureSRV) of the shape's own texture
+// in `slot`, never an override: e.g. the face's FaceGen tint (the player's:
+// the composited tint layers) or its diffuse, as a GPU material input.
+// Sampled as the engine samples it (the diffuse raw, not decoded). It holds
+// the texture of the head as loaded now: a rebuild may load another
+// (ReloadActorHead after RaceMenu), so wrap again after the generation
+// changes. Destroy it with DestroyGpuObject. Returns 0 when the shape has no
+// texture there.
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot);
 
 // Turn a bone after the pose: a model-space rotation applied to the bone and
 // every bone under it after each pose (animation sample, bind pose, live
@@ -1647,7 +1723,8 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_PollGpuTextureRead(uint32_t read, uint
 //     engine texture as the first input, sRGB exactly when the original was
 //     (vanilla eyes: UNORM).
 //   - The same object is what the game draws; renderer preview scenes get no
-//     separate copy or override.
+//     separate copy or override (to draw an output on a preview head, see
+//     SetHeadShapeTexture).
 //   - Device loss: the object stays valid; its contents are undefined.
 
 } // extern "C"

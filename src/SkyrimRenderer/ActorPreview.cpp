@@ -1829,6 +1829,7 @@ uint32_t ActorPreview::CommitDrivenHead() {
         if (UploadMeshBindPose(ds.meshIndex, ds.staged.empty() ? nullptr : ds.staged.data())) ++uploaded;
     }
     uploaded += CommitHeadExtrasLocked();
+    ApplyTextureOverridesLocked();
     headDriveDirty_ = false;
     return uploaded;
 }

@@ -56,6 +56,17 @@ public:
     int32_t PollRead(ConsumerId caller, uint32_t read, uint8_t* rgba, uint32_t bufSize, uint32_t* width,
                      uint32_t* height);
 
+    /// True for a texture handle (output, wrapped or loaded) of `owner`.
+    bool IsTexture(ConsumerId owner, uint32_t texture);
+    /// The view a preview draw samples for a head shape texture override
+    /// (ActorPreview): the texture's own SRV (the values the engine samples),
+    /// or with srgbDecode an sRGB view of the same bytes when its own view is
+    /// UNORM and the resource can be viewed so (RGBA8 outputs can; *decoded
+    /// says whether it was). Null while it has no contents (not created yet,
+    /// failed, destroyed, device lost) and for another mod's handle.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> OverrideView(ConsumerId owner, uint32_t texture,
+                                                                   bool srgbDecode, bool* decoded);
+
     /// Runs every due instance. Game main thread, inside the frame.
     void Flush();
     /// Releases everything `consumer` created.
@@ -111,6 +122,12 @@ private:
         uint32_t width = 0, height = 0, mips = 0;
         bool srgb = false;
         bool destroyed = false;
+        /// OverrideView(srgbDecode): an sRGB view of srv's bytes, made on first
+        /// use; srgbViewOf is the srv it was made for (outputs and engine
+        /// textures can change their srv).
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srgbView;
+        ID3D11ShaderResourceView* srgbViewOf = nullptr;
+        bool srgbViewFailed = false;
         uint32_t ownerInstance = 0;     // outputs: the instance handle
         uint64_t version = 0;           // bumped whenever its contents change
     };

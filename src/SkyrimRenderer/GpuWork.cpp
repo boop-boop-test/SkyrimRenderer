@@ -74,6 +74,34 @@ bool IsSRGB(DXGI_FORMAT f) {
     }
 }
 
+/// The sRGB format reading the same bytes as a UNORM one (UNKNOWN: none).
+DXGI_FORMAT SRGBOf(DXGI_FORMAT f) {
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case DXGI_FORMAT_B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case DXGI_FORMAT_B8G8R8X8_UNORM: return DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+    case DXGI_FORMAT_BC1_UNORM: return DXGI_FORMAT_BC1_UNORM_SRGB;
+    case DXGI_FORMAT_BC2_UNORM: return DXGI_FORMAT_BC2_UNORM_SRGB;
+    case DXGI_FORMAT_BC3_UNORM: return DXGI_FORMAT_BC3_UNORM_SRGB;
+    case DXGI_FORMAT_BC7_UNORM: return DXGI_FORMAT_BC7_UNORM_SRGB;
+    default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+/// The TYPELESS format a UNORM / sRGB pair shares.
+DXGI_FORMAT TypelessOf(DXGI_FORMAT f) {
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8X8_TYPELESS;
+    case DXGI_FORMAT_BC1_UNORM: case DXGI_FORMAT_BC1_UNORM_SRGB: return DXGI_FORMAT_BC1_TYPELESS;
+    case DXGI_FORMAT_BC2_UNORM: case DXGI_FORMAT_BC2_UNORM_SRGB: return DXGI_FORMAT_BC2_TYPELESS;
+    case DXGI_FORMAT_BC3_UNORM: case DXGI_FORMAT_BC3_UNORM_SRGB: return DXGI_FORMAT_BC3_TYPELESS;
+    case DXGI_FORMAT_BC7_UNORM: case DXGI_FORMAT_BC7_UNORM_SRGB: return DXGI_FORMAT_BC7_TYPELESS;
+    default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 /// Size, mips and colour space of a 2D SRV.
 bool Describe(ID3D11ShaderResourceView* srv, uint32_t& width, uint32_t& height, uint32_t& mips, bool& srgb) {
     if (!srv) return false;
@@ -698,6 +726,62 @@ bool GpuWork::TextureInfo(ConsumerId caller, uint32_t texture, uint32_t* width, 
     if (srv) *srv = ready ? t->srv.Get() : nullptr;
     if (engineTexture) *engineTexture = ready ? t->engine.get() : nullptr;
     return ready;
+}
+
+bool GpuWork::IsTexture(ConsumerId owner, uint32_t texture) {
+    std::lock_guard lock(mutex_);
+    return Find(textures_, owner, texture) != nullptr;
+}
+
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GpuWork::OverrideView(ConsumerId owner, uint32_t texture,
+                                                                        bool srgbDecode, bool* decoded) {
+    if (decoded) *decoded = false;
+    std::lock_guard lock(mutex_);
+    auto t = Find(textures_, owner, texture);
+    // An output keeps its last contents while it runs again (PENDING), so only
+    // a texture with nothing usable is skipped.
+    if (!t || t->destroyed || !t->srv || t->status == SKYRIMRENDERER_GPU_FAILED ||
+        t->status == SKYRIMRENDERER_GPU_DEVICE_LOST || t->status == SKYRIMRENDERER_GPU_INVALID) {
+        return nullptr;
+    }
+    if (!srgbDecode) return t->srv;
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    t->srv->GetDesc(&view);
+    if (IsSRGB(view.Format)) {
+        if (decoded) *decoded = true;
+        return t->srv;
+    }
+    if (t->srgbView && t->srgbViewOf == t->srv.Get()) {
+        if (decoded) *decoded = true;
+        return t->srgbView;
+    }
+    if (t->srgbViewFailed && t->srgbViewOf == t->srv.Get()) return t->srv;
+
+    t->srgbView.Reset();
+    t->srgbViewOf = t->srv.Get();
+    t->srgbViewFailed = true;
+    const DXGI_FORMAT srgb = SRGBOf(view.Format);
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    t->srv->GetResource(resource.GetAddressOf());
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    if (srgb != DXGI_FORMAT_UNKNOWN && resource && SUCCEEDED(resource.As(&tex))) {
+        D3D11_TEXTURE2D_DESC td{};
+        tex->GetDesc(&td);
+        tex->GetDevice(device.GetAddressOf());
+        // Another view format needs a TYPELESS resource of the same family.
+        if (device && td.Format == TypelessOf(view.Format)) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd = view;
+            sd.Format = srgb;
+            if (SUCCEEDED(device->CreateShaderResourceView(tex.Get(), &sd, t->srgbView.GetAddressOf()))) {
+                t->srgbViewFailed = false;
+                if (decoded) *decoded = true;
+                return t->srgbView;
+            }
+        }
+    }
+    return t->srv;
 }
 
 // ---------------------------------------------------------------------------

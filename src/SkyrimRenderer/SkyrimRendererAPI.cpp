@@ -752,6 +752,31 @@ SKYRIMRENDERER_API void SkyrimRenderer_RemoveHeadExtraShape(uint32_t actor, int3
     if (auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor))) a->RemoveHeadExtraShape(extra);
 }
 
+SKYRIMRENDERER_API int32_t SkyrimRenderer_SetHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot,
+                                                               uint32_t texture) {
+    const auto caller = SKYRIMRENDERER_CALLER;
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->SetHeadShapeTexture(shape, slot, texture, caller) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API int32_t SkyrimRenderer_ClearHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a && a->ClearHeadShapeTexture(shape, slot) ? 1 : 0;
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeTexture(shape, slot) : 0;
+}
+
+SKYRIMRENDERER_API uint32_t SkyrimRenderer_WrapHeadShapeTexture(uint32_t actor, uint32_t shape, uint32_t slot) {
+    const auto caller = SKYRIMRENDERER_CALLER;
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    if (!a) return 0;
+    auto srv = a->GetHeadShapeOwnTexture(shape, slot);
+    return srv ? GpuWork::Get().WrapSRV(caller, srv.Get()) : 0;
+}
+
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetHeadShapeGeneration(uint32_t actor) {
     auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
     return a ? a->GetHeadShapeGeneration() : 0;
