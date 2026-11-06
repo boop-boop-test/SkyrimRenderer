@@ -114,7 +114,8 @@ extern "C" {
 //      RemoveHeadExtraShape
 //   4  build 1.12.0: SetHeadShapeTexture, ClearHeadShapeTexture,
 //      GetHeadShapeTexture, WrapHeadShapeTexture
-#define SKYRIMRENDERER_API_VERSION 4
+//   5  build 1.13.0: GetHeadShapeMesh
+#define SKYRIMRENDERER_API_VERSION 5
 
 SKYRIMRENDERER_API uint32_t SkyrimRenderer_GetAPIVersion(void);
 
@@ -591,6 +592,24 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
 
 // Fill out (out->structSize must be set). Returns 1/0.
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRenderer_HeadSourceInfo* out);
+
+// A head shape's UVs and drawn triangles (API 5), copied out, in the vertex
+// order of HeadShapeInfo.positions / restPositions (the order tri morphs
+// index). Triangles are the ones the preview draws: for a skinned SE shape
+// the skin partition's, mapped to shape vertex ids, after any partition a
+// worn item hides. They change only with GetHeadShapeGeneration.
+//   uvs:     vertexCount * 2 floats (u, v as the NIF stores them: v down);
+//            uvCapacity in floats.
+//   indices: triangleCount * 3 vertex ids; indexCapacity in uint32_t.
+// Either buffer may be NULL (skipped), so a call with both NULL asks the
+// counts. vertexCount / triangleCount (optional) are set whenever the shape
+// is known. Returns 1 when every non-NULL buffer was filled, -1 when one is
+// too small (nothing copied into it; the counts say what it needs), 0 for an
+// unknown actor or shape. Game main thread.
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeMesh(uint32_t actor, uint32_t shape, float* uvs,
+                                                            uint32_t uvCapacity, uint32_t* indices,
+                                                            uint32_t indexCapacity, uint32_t* vertexCount,
+                                                            uint32_t* triangleCount);
 
 // SKYRIMRENDERER_HEAD_DRIVE_* for every shape of a head actor. Changing
 // OFFSETS resets every positions[] array (to rest, or to zeros). On a full

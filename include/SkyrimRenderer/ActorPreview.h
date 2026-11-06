@@ -239,6 +239,9 @@ public:
     /// shape indices from before are then invalid).
     uint32_t GetHeadShapeGeneration() const;
     bool GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo& out);
+    /// SkyrimRenderer_GetHeadShapeMesh: 1 filled, -1 a buffer too small, 0 unknown shape.
+    int32_t GetHeadShapeMesh(uint32_t index, float* uvs, uint32_t uvCapacity, uint32_t* indices,
+                             uint32_t indexCapacity, uint32_t* vertexCount, uint32_t* triangleCount);
     bool GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const;
     /// SKYRIMRENDERER_HEAD_DRIVE_* flags; changing OFFSETS resets the arrays.
     /// On a full preview the first call builds the driven head shapes.

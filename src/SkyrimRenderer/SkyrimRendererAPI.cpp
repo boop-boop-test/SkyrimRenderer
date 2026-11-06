@@ -712,6 +712,14 @@ SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeInfo(
     return a && a->GetHeadShapeInfo(index, *out) ? 1 : 0;
 }
 
+SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadShapeMesh(uint32_t actor, uint32_t shape, float* uvs,
+                                                            uint32_t uvCapacity, uint32_t* indices,
+                                                            uint32_t indexCapacity, uint32_t* vertexCount,
+                                                            uint32_t* triangleCount) {
+    auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));
+    return a ? a->GetHeadShapeMesh(shape, uvs, uvCapacity, indices, indexCapacity, vertexCount, triangleCount) : 0;
+}
+
 SKYRIMRENDERER_API int32_t SkyrimRenderer_GetHeadSource(uint32_t actor, SkyrimRenderer_HeadSourceInfo* out) {
     if (!out) return 0;
     auto* a = SceneManager::GetInstance().GetActorPreview(ToActor(actor));

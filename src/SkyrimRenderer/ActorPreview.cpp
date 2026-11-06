@@ -1721,6 +1721,43 @@ bool ActorPreview::GetHeadShapeInfo(uint32_t index, SkyrimRenderer_HeadShapeInfo
     return true;
 }
 
+int32_t ActorPreview::GetHeadShapeMesh(uint32_t index, float* uvs, uint32_t uvCapacity, uint32_t* indices,
+                                       uint32_t indexCapacity, uint32_t* vertexCount, uint32_t* triangleCount) {
+    std::lock_guard lock(mutex_);
+    ValidateDrivenHeadLocked();
+    if (index >= drivenShapes_.size()) return 0;
+    const auto& ds = drivenShapes_[index];
+    const auto& meshes = scene_.GetLoadedMeshes();
+    if (ds.meshIndex >= meshes.size()) return 0;
+    const auto& mesh = meshes[ds.meshIndex];
+    // The CPU vertex copy is what the driven positions write into: same order.
+    const size_t vertices = mesh.bindPoseVertices.size();
+    if (vertices * 3 != ds.rest.size()) return 0;
+    const size_t triangles = mesh.indices.size() / 3;
+    if (vertexCount) *vertexCount = static_cast<uint32_t>(vertices);
+    if (triangleCount) *triangleCount = static_cast<uint32_t>(triangles);
+
+    int32_t result = 1;
+    if (uvs) {
+        if (uvCapacity < vertices * 2) {
+            result = -1;
+        } else {
+            for (size_t v = 0; v < vertices; ++v) {
+                uvs[v * 2] = mesh.bindPoseVertices[v].uv[0];
+                uvs[v * 2 + 1] = mesh.bindPoseVertices[v].uv[1];
+            }
+        }
+    }
+    if (indices) {
+        if (indexCapacity < triangles * 3) {
+            result = -1;
+        } else {
+            for (size_t i = 0; i < triangles * 3; ++i) indices[i] = mesh.indices[i];
+        }
+    }
+    return result;
+}
+
 bool ActorPreview::GetHeadSource(SkyrimRenderer_HeadSourceInfo& out) const {
     std::lock_guard lock(mutex_);
     // A full preview whose head is covered (or not loaded) has no head source.
