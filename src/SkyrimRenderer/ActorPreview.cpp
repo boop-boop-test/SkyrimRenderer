@@ -1625,10 +1625,12 @@ void ActorPreview::BuildDrivenHead() {
         if (headDriveFlags_ & SKYRIMRENDERER_HEAD_DRIVE_OFFSETS) ds.positions.assign(n * 3, 0.0f);
         else ds.positions = ds.rest;
 
-        SKSE::log::info("[SkyrimRenderer] Head shape {} '{}': {} verts, head part {} (type {})",
+        SKSE::log::info("[SkyrimRenderer] Head shape {} '{}': {} verts, head part {} (type {}), mesh #{} "
+                        "diffuse '{}' tint {}",
                         drivenShapes_.size(), mesh.name, n,
                         ds.part && ds.part->GetFormEditorID() ? ds.part->GetFormEditorID() : "(none)",
-                        ds.part ? static_cast<int>(ds.part->type.get()) : -1);
+                        ds.part ? static_cast<int>(ds.part->type.get()) : -1, i, mesh.diffuseTexturePath,
+                        static_cast<const void*>(mesh.tintSRV.Get()));
         drivenShapes_.push_back(std::move(ds));
     }
 }
@@ -3016,12 +3018,12 @@ void ActorPreview::RebuildMeshes(const std::vector<RE::FormID>& armorFormIDs) {
             case ShadingModel::TruePBR:    modelName = "TruePBR";    break;
         }
         SKSE::log::info("[SkyrimRenderer] Mesh '{}': shading={} tint=({:.3f},{:.3f},{:.3f}) "
-                        "specStr={:.3f} specColor=({:.3f},{:.3f},{:.3f}) flags=0x{:X}",
+                        "specStr={:.3f} specColor=({:.3f},{:.3f},{:.3f}) flags=0x{:X} tintTex {}",
                         mesh.name, modelName,
                         mesh.tintColor[0], mesh.tintColor[1], mesh.tintColor[2],
                         mesh.specularStrength,
                         mesh.specularColorRGB[0], mesh.specularColorRGB[1], mesh.specularColorRGB[2],
-                        static_cast<uint32_t>(mesh.shaderFlags));
+                        static_cast<uint32_t>(mesh.shaderFlags), static_cast<const void*>(mesh.tintSRV.Get()));
     }
 
     scene_.SetCameraPreset(CameraPreset::FullBody);

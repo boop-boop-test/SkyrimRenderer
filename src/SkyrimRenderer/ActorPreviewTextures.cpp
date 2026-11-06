@@ -246,7 +246,15 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ActorPreview::GetHeadShapeOwnTe
         }
     }
     SRV own = *SlotView(*mesh, slot);
-    if (!own) return fail(std::format("'{}' has no texture in that slot", name));
+    if (!own) {
+        const auto& all = scene_.GetLoadedMeshes();
+        return fail(std::format("'{}' has no texture in that slot (mesh #{} of {}, shading {}, diffuse '{}', views "
+                                "d{} n{} sk{} det{} tint{} spec{})",
+                                name, mesh - all.data(), all.size(), static_cast<int>(mesh->shadingModel),
+                                mesh->diffuseTexturePath, mesh->diffuseSRV ? 1 : 0, mesh->normalSRV ? 1 : 0,
+                                mesh->skSRV ? 1 : 0, mesh->detailSRV ? 1 : 0, mesh->tintSRV ? 1 : 0,
+                                mesh->specularSRV ? 1 : 0));
+    }
     return own;
 }
 
